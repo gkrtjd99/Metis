@@ -1,0 +1,6 @@
+interface:
+  display_name: "Metis"
+  short_description: "Run an explicit managed coding goal"
+  default_prompt: "Use /goal $metis \"<objective>\" to run a managed development goal end to end."
+policy:
+  allow_implicit_invocation: false

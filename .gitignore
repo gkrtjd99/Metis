@@ -1,0 +1,61 @@
+# Dependencies and test/build output
+node_modules/
+coverage/
+dist/
+*.tgz
+*.tar.gz
+*.log
+npm-debug.log*
+
+# Local implementation notes
+/docs/PERFORMANCE_OPTIMIZATION_PROMPT.md
+/release/
+
+# Project-local agent installations and runtime state
+/.agents/
+/.claude/
+/.codex/
+/.opencode/
+/.metis/
+/plugins/metis/
+/.runtime/
+/.state/
+
+# Local caches and temporary files
+/.cache/
+/.logs/
+/.temp/
+/.tmp/
+/tmp/
+/logs/
+/temp/
+*.tmp
+*.swp
+
+# Local environment and key material
+.env
+.env.*
+!.env.example
+.credentials/
+.secrets/
+credentials/
+secrets/
+*.credentials
+*.secret
+*.token
+*.key
+*.pem
+*.p12
+*.pfx
+*.keystore
+
+# Generated checksums
+*.sha
+*.sha1
+*.sha256
+*.sha512
+
+# OS and editor metadata
+.DS_Store
+.idea/
+.vscode/

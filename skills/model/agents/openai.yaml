@@ -1,0 +1,6 @@
+interface:
+  display_name: "Metis Model"
+  short_description: "Configure Main and subagent model routing"
+  default_prompt: "Use $model to configure Main expectations and subagent model routing for this project."
+policy:
+  allow_implicit_invocation: false

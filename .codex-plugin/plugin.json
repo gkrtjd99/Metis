@@ -1,0 +1,32 @@
+{
+  "name": "metis",
+  "version": "1.0.0",
+  "description": "Run one repository objective through a subagent-first engineering workflow with compiled Task Packets.",
+  "author": {
+    "name": "Austin"
+  },
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "orchestration",
+    "planning",
+    "context-engineering",
+    "documentation"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Metis",
+    "shortDescription": "Orchestrate one goal through fresh subagents",
+    "longDescription": "An explicit opt-in engineering orchestrator. Use $metis for managed goals and $metis:model for interactive project model routing; capability documentation remains internal and loads only after routing. Use /goal $metis to keep Main at goal-level control while fresh subagents perform discovery, research, synthesis, design, planning, Task Packet compilation, parallel implementation, diagnosis, review, verification, and curation.",
+    "developerName": "Austin",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use /goal $metis \"<objective>\" to run the complete subagent-first workflow"
+    ]
+  }
+}
