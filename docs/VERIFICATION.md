@@ -1,6 +1,6 @@
 # Verification
 
-Metis 1.0.0 verifies both the runtime control plane and the subagent-first workflow contract.
+Metis 1.0.1 verifies both the runtime control plane and the subagent-first workflow contract.
 The release suite must pass from source and from the packed npm archive.
 
 ## Release command
@@ -26,7 +26,7 @@ Generate the reference after changing metadata, defaults, layout, or CLI help:
 npm run docs:generate
 ```
 
-## 1.0.0 orchestration coverage
+## 1.0.1 orchestration coverage
 
 The performance release coverage additionally verifies:
 
@@ -46,6 +46,22 @@ The performance release coverage additionally verifies:
 - token packet-budget warnings are durable; they do not become silent success.
 
 The release tests verify that the lifecycle is executed by subagents instead of Main.
+
+## Release security and supply-chain coverage
+
+Release readiness also records:
+
+- commit-pinned checkout, setup, and plugin security scanner actions in CI;
+- `npm ci` coverage for the committed lockfile, plus Dependabot and SECURITY
+  policy surfaces;
+- scanner-safe deterministic fixtures whose behavior is verified externally;
+- disposable benchmark workspaces with explicit child environments, bounded
+  process cleanup, and scoped host/model evidence;
+- task-ID validation before filesystem mutation, detached worktrees, and
+  declared path ownership for mutable tasks.
+
+These controls establish release integrity and containment. They do not assert
+or imply a performance improvement.
 
 ### Discovery and research
 
@@ -136,6 +152,8 @@ They do not simulate concurrency only inside one JavaScript call stack.
 Tests verify:
 
 - every mutable task receives a detached Git worktree;
+- path-like or unsafe task IDs are rejected before task/worktree filesystem
+  mutation;
 - no shared mutable fallback exists;
 - overlapping mutable path ownership is rejected;
 - unreported changed files are rejected;
@@ -156,6 +174,8 @@ Tests verify:
 - a successful check that modifies protected repository state fails;
 - a successful non-mutating check passes;
 - repository benchmark execution requires explicit opt-in;
+- each benchmark run uses a disposable workspace with an explicit child
+  environment and keeps its process/cleanup evidence bounded to that run;
 - benchmark timeout cleanup settles once even when an escaped descendant keeps
   inherited stdout and stderr open;
 - Linux descendant containment exercises the runtime `/proc` inventory path;
@@ -241,7 +261,7 @@ repository scan, preserve differing files under `force=false`, and report the
 `no-run`, live-controller, expired-controller, paused, and completed routes
 without automatic takeover.
 
-The packed archive must include the 1.0.0 Task Packet, interface, plan-ingestion,
+The packed archive must include the 1.0.1 Task Packet, interface, plan-ingestion,
 and role runtime surfaces. Development tests remain in Git for CI and are
 excluded from the installable package.
 
@@ -252,7 +272,7 @@ The normal release suite validates host adapters, installed role files, task con
 Actual native Codex, Claude Code, and OpenCode end-to-end tests require those CLIs to be installed and authenticated in the release environment.
 If they are unavailable, the release metadata must state that limitation.
 A green package suite must not be described as a native-host agent-spawn test.
-For 1.0.0, all three native host integrations remain adapter previews until
+For 1.0.1, all three native host integrations remain adapter previews until
 that release-environment evidence is recorded.
 
 ## Release evidence
@@ -268,11 +288,16 @@ A release record should contain:
 - browser smoke availability and result;
 - schema, configuration, and runtime layout versions.
 
-The canonical 1.0.0 versions are:
+The canonical 1.0.1 versions are:
 
 ```text
-package: 1.0.0
+package: 1.0.1
 schema: 11
 configuration: 6
 runtime layout: 4
 ```
+
+The benchmark variant `metis-pre-1.0-baseline` intentionally names the
+historical pre-1.0 source. Separate compatibility fixtures describe the
+unmodified 1.0.0 schema. The current release candidate is
+`metis-1.0.1-candidate`; none of these names is a performance claim.

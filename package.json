@@ -1,6 +1,6 @@
 {
   "name": "metis-orchestrator",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A subagent-first, evidence-driven orchestration runtime for long repository goals.",
   "author": "Austin",
   "type": "module",

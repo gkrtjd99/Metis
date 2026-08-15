@@ -1,6 +1,6 @@
 # Operations
 
-Metis 1.0.0 runs one managed repository objective through a subagent-first lifecycle.
+Metis 1.0.1 runs one managed repository objective through a subagent-first lifecycle.
 Main remains the controller.
 Fresh subagents perform repository inspection, research, design, planning, implementation, review, verification, diagnosis, and curation.
 
@@ -9,7 +9,7 @@ Fresh subagents perform repository inspection, research, design, planning, imple
 From a packaged archive:
 
 ```sh
-npm install -g ./metis-orchestrator-1.0.0.tgz
+npm install -g ./metis-orchestrator-1.0.1.tgz
 ```
 
 Install one or all host adapters from the repository root:
@@ -549,7 +549,7 @@ metis benchmark run --yes --allow-repository-exec \
   --baseline-commit <baseline-sha> \
   --candidate-commit <candidate-sha>
 metis benchmark report --name repository-goals
-metis benchmark compare repository-goals metis-pre-1.0-baseline metis-1.0.0-candidate \
+metis benchmark compare repository-goals metis-pre-1.0-baseline metis-1.0.1-candidate \
   --baseline-commit <baseline-sha> \
   --candidate-commit <candidate-sha>
 ```
@@ -557,6 +557,12 @@ metis benchmark compare repository-goals metis-pre-1.0-baseline metis-1.0.0-cand
 The official comparison fails closed unless both commits exist, differ, the
 candidate equals the clean checkout at `HEAD`, every durable result names the
 matching commit, and the measured release acceptance gates pass.
+
+Each benchmark variant runs in a disposable workspace with an explicit child
+environment and bounded process cleanup. This is not an untrusted-code sandbox.
+Host/model configuration, temporary paths, and read-only metrics remain scoped
+to that run. Variant names identify evidence sources; they do not by themselves
+establish a performance gain.
 
 A benchmark that executes repository commands needs explicit opt-in:
 

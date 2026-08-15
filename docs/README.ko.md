@@ -1,11 +1,11 @@
-# Metis 1.0.0
+# Metis 1.0.1
 
 [English](../README.md) | [한국어](README.ko.md)
 
 Metis는 장기 repository 목표를 위한 subagent 우선 engineering
 오케스트레이터입니다. Codex, Claude Code, OpenCode용 adapter preview를 통해
 discovery, research, design, planning, implementation, review, verification을
-구조화합니다. 이번 1.0.0은 첫 public release입니다.
+구조화합니다. 1.0.1은 현재 public release입니다.
 
 Managed goal 하나를 시작하면 됩니다.
 
@@ -28,7 +28,7 @@ Metis는 목표를 완료하거나 사용자 또는 외부 권한의 명시적�
 Release package는 macOS(darwin)와 Linux만 지원합니다. Windows는 지원 대상이
 아닙니다.
 
-1.0.0 host 상태:
+1.0.1 host 상태:
 
 | Host | 상태 | Release evidence |
 | --- | --- | --- |
@@ -40,11 +40,17 @@ Package test 통과를 native-host E2E 증거로 간주하지 않습니다. 인�
 환경에서 goal 시작부터 verification까지 전체 flow가 통과한 host만 supported로
 승격합니다.
 
-[`v1.0.0` release](https://github.com/gkrtjd99/Metis/releases/tag/v1.0.0)에서
-`metis-orchestrator-1.0.0.tgz`를 내려받아 설치합니다.
+1.0.1은 pinned security 및 supply-chain CI, npm lockfile과 Dependabot 및
+SECURITY policy, scanner-safe fixture, 명시적인 benchmark child environment,
+task-ID/worktree containment으로 release integrity를 강화합니다. 이는
+validation과 containment control이며, untrusted-code sandbox를 의미하지
+않습니다. 이번 release는 성능 향상을 주장하지 않습니다.
+
+[`v1.0.1` release](https://github.com/gkrtjd99/Metis/releases/tag/v1.0.1)에서
+`metis-orchestrator-1.0.1.tgz`를 내려받아 설치합니다.
 
 ```sh
-npm install -g ./metis-orchestrator-1.0.0.tgz
+npm install -g ./metis-orchestrator-1.0.1.tgz
 ```
 
 GitHub source에서 직접 설치할 수도 있습니다.

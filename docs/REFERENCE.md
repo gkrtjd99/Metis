@@ -8,7 +8,7 @@ Run `npm run docs:generate` after changing runtime metadata, defaults, layout, o
 ```json
 {
   "name": "metis-orchestrator",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "schemaVersion": 11,
   "configVersion": 6,
   "runtimeLayoutVersion": 4

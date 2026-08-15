@@ -1,6 +1,6 @@
 # Architecture
 
-Metis 1.0.0 uses schema version 11, configuration version 6, and runtime layout version 4.
+Metis 1.0.1 uses schema version 11, configuration version 6, and runtime layout version 4.
 
 ## System purpose
 
@@ -174,6 +174,9 @@ scenario, variant, pass-rate, and failure evidence separate. The benchmark
 suite is opt-in for repository execution and must compare baseline, candidate,
 and plain-host controls before claiming a performance threshold.
 
+The current comparison names the historical `metis-pre-1.0-baseline` and the
+`metis-1.0.1-candidate`; names alone do not claim a performance gain.
+
 The runtime uses ten phases:
 
 ```text
@@ -197,7 +200,7 @@ The runtime invalidates downstream state.
 
 ## Universal task graph
 
-Metis 1.0.0 uses tasks for the complete lifecycle.
+Metis 1.0.1 uses tasks for the complete lifecycle.
 Implementation is not a special scheduling system.
 
 Task kinds:
@@ -587,6 +590,8 @@ The runtime uses:
 - task attempt fencing tokens;
 - SQLite transactions for graph and batch transitions;
 - task leases and heartbeat;
+- validation that task IDs remain logical identities before they become
+  filesystem names;
 - required Git worktrees for mutable tasks;
 - exclusive path ownership;
 - serialized integration;
@@ -645,5 +650,5 @@ Runtime layout:
 
 ## Version boundary
 
-Version 1.0.0 rejects incompatible schema and configuration versions.
+Version 1.0.1 rejects incompatible schema and configuration versions.
 New projects create runtime state with the canonical versions above.
