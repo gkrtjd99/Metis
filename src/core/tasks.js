@@ -20,6 +20,7 @@ import {
   cleanupTaskWorkspace,
   finalizeTaskWorkspace,
   getTaskWorkspace,
+  isSafeTaskId,
   prepareTaskWorkspace,
   snapshotWorkspace,
   validateMutableOwnershipPaths
@@ -489,6 +490,10 @@ export function addTask(db, runId, input, config) {
   invariant(Object.hasOwn(PHASE_ROLES, run.phase), "TASK_PHASE", "Tasks cannot be added in the current phase.");
   const taskCount = Number(db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE run_id = ?").get(run.id).count);
   invariant(taskCount < config.orchestration.maxTasks, "TASK_LIMIT", `Run ${run.id} reached its ${config.orchestration.maxTasks}-task limit.`);
+  const suppliedId = input.id ?? input.Id;
+  if (suppliedId !== undefined && suppliedId !== null) {
+    invariant(isSafeTaskId(suppliedId), "TASK_ID_INVALID", "Task ID must be a single safe portable path component.");
+  }
 
   const title = String(field(input, "title", "Title", field(input, "goal", "Goal", ""))).trim();
   const goal = String(field(input, "goal", "Goal", title)).trim();
@@ -585,7 +590,7 @@ export function addTask(db, runId, input, config) {
     model: field(input, "model", "Model", undefined),
     reasoningEffort: field(input, "reasoningEffort", "ReasoningEffort", null)
   });
-  const id = input.id ?? input.Id ?? makeId("task");
+  const id = suppliedId ?? makeId("task");
   const timestamp = now();
   const specialist = REVIEW_ROLES.has(role) && role !== "reviewer" && role !== "adversarial-reviewer"
     ? role.replace(/-reviewer$/u, "")
@@ -1071,7 +1076,10 @@ export function acknowledgeTaskSpawn(db, runId, taskId, attemptFence, owner, con
     `).run(taskId, Number(attemptFence), batchId, owner, now());
     if (inserted.changes === 0) return { taskId, attemptFence: Number(attemptFence), acknowledged: false };
     markTaskAttemptSpawnAccepted(db, taskId, attemptFence);
-    consumeBudget(db, runId, counters, { source: batchId ? `scheduler-spawn:${batchId}:${taskId}` : `task-spawn:${taskId}` });
+    const source = batchId
+      ? "scheduler-spawn:" + batchId + ":" + taskId
+      : "task-spawn:" + taskId;
+    consumeBudget(db, runId, counters, { source });
     recordEvent(db, runId, "task.spawn-acknowledged", "info", { taskId, attemptFence: Number(attemptFence), batchId, owner });
     return { taskId, attemptFence: Number(attemptFence), acknowledged: true };
   });

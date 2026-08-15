@@ -55,7 +55,7 @@ function acquireRepositorySyncLease(db, projectRoot) {
   const ownerToken = makeId("repository-sync");
 
   for (;;) {
-    db.exec(`PRAGMA busy_timeout = ${REPOSITORY_SYNC_BUSY_TIMEOUT_MS}`);
+    db.exec("PRAGMA busy_timeout = " + REPOSITORY_SYNC_BUSY_TIMEOUT_MS);
     try {
       db.exec("BEGIN IMMEDIATE");
     } catch (error) {

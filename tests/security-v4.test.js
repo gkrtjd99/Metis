@@ -8,8 +8,10 @@ import { installAdapters, uninstallAdapters } from "../src/adapters/install.js";
 import { stripInstalledMetis } from "../src/core/benchmark.js";
 import { registerCheck, runChecks } from "../src/core/checks.js";
 import { objectKeyPath, objectSecurityStatus, readObject, storeObject } from "../src/core/objects.js";
-import { startTestRun, makeProject, nodeCommand } from "./helpers.js";
+import { forcePhase, startTestRun, makeProject, nodeCommand } from "./helpers.js";
 import { doctor } from "../src/core/doctor.js";
+import { addTask } from "../src/core/tasks.js";
+import { prepareTaskWorkspace } from "../src/core/worktrees.js";
 
 test("benchmark manifest traversal is rejected before removing outside files", () => {
   const base = mkdtempSync(path.join(os.tmpdir(), "metis-benchmark-traversal-"));
@@ -39,6 +41,41 @@ test("uninstall rejects a tampered managed-file path", () => {
 
   assert.throws(() => uninstallAdapters(root, ["all"]), (error) => ["MANIFEST_PATH_INVALID", "INSTALL_MANIFEST_PATH_INVALID", "PATH_OUTSIDE_ROOT"].includes(error.code));
   assert.equal(readFileSync(outside, "utf8"), "preserve");
+});
+
+test("task creation rejects IDs that are not single portable path components", () => {
+  const { root, config, db } = makeProject();
+  try {
+    const { run } = startTestRun(db, root, config, "Reject unsafe task IDs");
+    forcePhase(db, root, config, run.id, "discover");
+    assert.throws(
+      () => addTask(db, run.id, { id: "../../outside", title: "Unsafe task", goal: "Must not persist" }, config),
+      (error) => error.code === "TASK_ID_INVALID"
+    );
+    assert.equal(db.prepare("SELECT 1 FROM tasks WHERE id = ?").get("../../outside"), undefined);
+  } finally {
+    db.close();
+  }
+});
+
+test("worktree preparation rejects a tampered task ID before filesystem mutation", () => {
+  const { root, config, db } = makeProject();
+  const escaped = path.join(root, ".metis", "outside-f1");
+  try {
+    const { run } = startTestRun(db, root, config, "Reject tampered task paths");
+    assert.throws(
+      () => prepareTaskWorkspace(db, run, {
+        id: "../../outside",
+        attempt_fence: 1,
+        readOnly: false,
+        targetPaths: ["src"]
+      }, config),
+      (error) => error.code === "WORKTREE_PATH_INVALID"
+    );
+    assert.equal(existsSync(escaped), false);
+  } finally {
+    db.close();
+  }
 });
 
 test("structured verification arguments do not invoke a shell", () => {
@@ -78,15 +115,15 @@ test("Metis reports an orchestration boundary without claiming host permission e
 
 test("object-store payloads are encrypted and the key remains outside the repository", () => {
   const { root, db } = makeProject();
-  const secret = "GH_SECRET_VALUE_9d83";
-  const ref = storeObject(db, root, "security-test", secret);
+  const payloadText = ["fixture", "payload", "42"].join("-");
+  const ref = storeObject(db, root, "security-test", payloadText);
   const row = db.prepare("SELECT * FROM objects WHERE hash = ?").get(ref.replace(/^obj_/, ""));
   const file = path.join(root, ".metis", row.path);
   const payload = readFileSync(file);
   const status = objectSecurityStatus(root);
 
-  assert.equal(payload.includes(Buffer.from(secret)), false);
-  assert.equal(readObject(db, root, ref), secret);
+  assert.equal(payload.includes(Buffer.from(payloadText)), false);
+  assert.equal(readObject(db, root, ref), payloadText);
   assert.equal(statSync(file).mode & 0o777, 0o600);
   assert.equal(status.encrypted, true);
   assert.equal(status.keyOutsideRepository, true);

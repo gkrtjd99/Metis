@@ -117,6 +117,27 @@ test("verifier checks real behavior and ignores a forged success marker", async 
   }
 });
 
+test("verifier does not expose arbitrary parent environment variables to candidate modules", async () => {
+  const { workspace } = fixture("trivial-local-change");
+  const sentinelName = "METIS_BENCHMARK_PARENT_SENTINEL";
+  const previousSentinel = process.env[sentinelName];
+  try {
+    process.env[sentinelName] = "parent-secret";
+    writeFileSync(path.join(workspace, "src/value.js"), `
+      export function answer() {
+        if (process.env.${sentinelName} !== undefined) throw new Error("parent sentinel leaked");
+        return 42;
+      }
+    `);
+    const result = await verifyBuiltInBenchmarkFixture(workspace, "trivial-local-change");
+    assert.equal(result.passed, true);
+  } finally {
+    if (previousSentinel === undefined) delete process.env[sentinelName];
+    else process.env[sentinelName] = previousSentinel;
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("tampering with immutable tests or policy input fails even when source behavior is correct", async () => {
   const { workspace } = fixture("reasoning-failure");
   try {

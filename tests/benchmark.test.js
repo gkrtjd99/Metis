@@ -72,6 +72,16 @@ async function killTestProcess(pid) {
   await assertProcessGone(pid, 2000);
 }
 
+function buildProcessGroupParentScript(grandchildScript) {
+  return [
+    "const fs = require('node:fs');",
+    "const { spawn } = require('node:child_process');",
+    "const script = " + JSON.stringify(grandchildScript) + ";",
+    "const child = spawn(process.execPath, ['-e', script, process.argv[1], process.argv[2]], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });",
+    "child.once('message', (message) => { if (message !== 'ready') return; fs.writeFileSync(process.argv[3], String(child.pid)); setInterval(() => {}, 1000); });"
+  ].join(" ");
+}
+
 
 test("benchmark initialization isolates the Metis setup as an explicit variant step", () => {
   const { root, db } = makeProject();
@@ -665,13 +675,7 @@ test("benchmark timeout contains a child process group and bounds wall time", as
       "if (process.send) process.send('ready');",
       "setInterval(() => {}, 1000);"
     ].join(" ");
-    const parentScript = [
-      "const fs = require('node:fs');",
-      "const { spawn } = require('node:child_process');",
-      `const script = ${JSON.stringify(grandchildScript)};`,
-      "const child = spawn(process.execPath, ['-e', script, process.argv[1], process.argv[2]], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });",
-      "child.once('message', (message) => { if (message !== 'ready') return; fs.writeFileSync(process.argv[3], String(child.pid)); setInterval(() => {}, 1000); });"
-    ].join(" ");
+    const parentScript = buildProcessGroupParentScript(grandchildScript);
     writeFileSync(file, JSON.stringify({
       version: 2,
       name: "process-group-timeout",

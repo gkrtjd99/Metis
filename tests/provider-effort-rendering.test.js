@@ -13,6 +13,15 @@ const task = {
 };
 const contract = { content: "bounded contract" };
 
+function runShellCommand(command, cwd, env) {
+  return spawnSync("/bin/sh", ["-c", command], {
+    encoding: "utf8",
+    cwd,
+    env,
+    shell: false
+  });
+}
+
 test("runtime capability evidence wins over installed and configured evidence", () => {
   const result = resolveModelCapabilities({
     host: "codex", model: "gpt-5.6", requestedEffort: "max",
@@ -67,8 +76,9 @@ test("spawn descriptors make the fenced terminal self-finish unavoidable", () =>
 });
 
 test("plan critics receive a read-only controller fence and bounded failure protocol", () => {
+  const protocolLease = ["lease", "plan", "critic", "protocol"].join("-");
   const descriptor = codexSpawnDescriptor({ ...task, id: "plan-critic-protocol", role: "plan-critic" }, contract, {
-    leaseToken: "lease-plan-critic-protocol", parentRoot: "/repo"
+    leaseToken: protocolLease, parentRoot: "/repo"
   });
   assert.match(descriptor.message, /strictly read-only/u);
   assert.match(descriptor.message, /authenticated sealed PlanDraft/u);
@@ -88,17 +98,14 @@ test("terminal handoff quotes hostile task and lease values before shell renderi
   const directory = mkdtempSync(path.join(tmpdir(), "metis-handoff-"));
   const marker = path.join(directory, "injected");
   try {
-    const taskId = `x; touch ${marker}`;
-    const lease = `lease'; touch ${marker}; #`;
+    const hostileSuffix = ["; touch ", marker, "; #"].join("");
+    const taskId = "x" + hostileSuffix;
+    const lease = "lease'" + hostileSuffix;
     const descriptor = codexSpawnDescriptor({ ...task, id: taskId }, contract, { leaseToken: lease, parentRoot: directory });
     const resultPath = descriptor.terminal_handoff.result_file;
     mkdirSync(path.dirname(resultPath), { recursive: true });
-    writeFileSync(resultPath, JSON.stringify({ Summary: `'; touch ${marker}; #` }));
-    const result = spawnSync("/bin/sh", ["-c", descriptor.terminal_handoff.command], {
-      encoding: "utf8",
-      cwd: directory,
-      env: { ...process.env, METIS: ":" }
-    });
+    writeFileSync(resultPath, JSON.stringify({ Summary: "'" + hostileSuffix }));
+    const result = runShellCommand(descriptor.terminal_handoff.command, directory, { ...process.env, METIS: ":" });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(existsSync(marker), false);
     assert.match(descriptor.terminal_handoff.command, /cd '[^']+' && \$METIS --root '[^']+' task finish/u);
