@@ -90,7 +90,7 @@ test("benchmark initialization isolates the Metis setup as an explicit variant s
     const initialized = initializeBenchmark(root, { name: "generated-eval", ...commits });
     const config = JSON.parse(readFileSync(initialized.file, "utf8"));
     const plain = config.variants.find((variant) => variant.name === "metis-pre-1.0-baseline");
-    const metis = config.variants.find((variant) => variant.name === "metis-1.0.0-candidate");
+    const metis = config.variants.find((variant) => variant.name === "metis-1.0.1-candidate");
     assert.ok(plain.setupByHost.codex.some((spec) => spec.command === "{node}" && spec.args.includes("init") && spec.args.includes("codex")));
     assert.ok(plain.setupByHost.codex.some((spec) => spec.args.includes("--prepare-baseline")));
     assert.equal(plain.instrumentation, "controller-lease-only");
@@ -119,7 +119,7 @@ test("official benchmark comparison rejects a dirty or mismatched checkout befor
     const commits = officialBenchmarkCommits(root);
     writeFileSync(path.join(root, "uncommitted.txt"), "dirty\n");
     assert.throws(
-      () => compareBenchmarkVariants(db, "release-eval", "metis-pre-1.0-baseline", "metis-1.0.0-candidate", {
+      () => compareBenchmarkVariants(db, "release-eval", "metis-pre-1.0-baseline", "metis-1.0.1-candidate", {
         projectRoot: root,
         ...commits
       }),
@@ -147,7 +147,7 @@ test("official benchmark comparison requires five config-bound repetitions per s
     for (const scenario of DEFAULT_BENCHMARK_SCENARIOS) {
       for (const [variant, metisSource, variantCommit] of [
         ["metis-pre-1.0-baseline", "git-worktree", commits.baselineCommit],
-        ["metis-1.0.0-candidate", "working-tree", commits.candidateCommit]
+        ["metis-1.0.1-candidate", "working-tree", commits.candidateCommit]
       ]) {
         sequence += 1;
         const id = `release-${sequence}`;
@@ -177,7 +177,7 @@ test("official benchmark comparison requires five config-bound repetitions per s
       }
     }
     assert.throws(
-      () => compareBenchmarkVariants(db, "release-eval", "metis-pre-1.0-baseline", "metis-1.0.0-candidate", {
+      () => compareBenchmarkVariants(db, "release-eval", "metis-pre-1.0-baseline", "metis-1.0.1-candidate", {
         projectRoot: root,
         file: initialized.file,
         ...commits
@@ -186,7 +186,7 @@ test("official benchmark comparison requires five config-bound repetitions per s
     );
     db.prepare("UPDATE benchmark_runs SET slot_utilization = 0.5 WHERE id = 'release-1'").run();
     assert.throws(
-      () => compareBenchmarkVariants(db, "release-eval", "metis-pre-1.0-baseline", "metis-1.0.0-candidate", {
+      () => compareBenchmarkVariants(db, "release-eval", "metis-pre-1.0-baseline", "metis-1.0.1-candidate", {
         projectRoot: root,
         file: initialized.file,
         ...commits

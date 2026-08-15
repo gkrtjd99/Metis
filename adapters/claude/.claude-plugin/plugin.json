@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "metis",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Run one coding objective through a subagent-first workflow with compiled Task Packets, parallel waves, diagnosis, review, and verification. Model routing is configured explicitly through the Metis model skill; capability documentation remains an internal lazy resource.",
   "author": {
     "name": "Austin"

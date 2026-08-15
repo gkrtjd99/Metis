@@ -1,11 +1,11 @@
-# Metis 1.0.0
+# Metis 1.0.1
 
 [English](README.md) | [한국어](docs/README.ko.md)
 
 Metis is a subagent-first engineering orchestrator for long repository goals.
 It provides Codex, Claude Code, and OpenCode adapter previews for structured
 discovery, research, design, planning, implementation, review, and
-verification. This is the first public release.
+verification. This is the current public release.
 
 Start one managed goal:
 
@@ -28,7 +28,7 @@ Requirements:
 The release package supports macOS (darwin) and Linux only. Windows is not a
 supported installation target.
 
-Host status for 1.0.0:
+Host status for 1.0.1:
 
 | Host | Status | Release evidence |
 | --- | --- | --- |
@@ -40,12 +40,19 @@ Do not treat a green package test as native-host E2E evidence. Promote a host
 to supported only after the complete goal-to-verification flow passes in an
 authenticated release environment.
 
-Download `metis-orchestrator-1.0.0.tgz` from the
-[v1.0.0 release](https://github.com/gkrtjd99/Metis/releases/tag/v1.0.0), then
+Release 1.0.1 hardens release integrity with pinned security and supply-chain
+CI, a committed npm lockfile with Dependabot and SECURITY policy, scanner-safe
+fixtures, explicit benchmark child environments, and task-ID/worktree
+containment.
+These are validation and containment controls; this release makes no
+performance claim.
+
+Download `metis-orchestrator-1.0.1.tgz` from the
+[v1.0.1 release](https://github.com/gkrtjd99/Metis/releases/tag/v1.0.1), then
 install it:
 
 ```sh
-npm install -g ./metis-orchestrator-1.0.0.tgz
+npm install -g ./metis-orchestrator-1.0.1.tgz
 ```
 
 Or install directly from the GitHub source:

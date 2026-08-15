@@ -1,6 +1,6 @@
 {
   "name": "metis",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Run one repository objective through a subagent-first engineering workflow with compiled Task Packets.",
   "author": {
     "name": "Austin"

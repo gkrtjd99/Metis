@@ -72,7 +72,7 @@ const BASELINE_SETUP_BY_HOST = Object.freeze(Object.fromEntries(Object.entries(M
 
 export const DEFAULT_BENCHMARK_VARIANTS = Object.freeze([
   { name: "metis-pre-1.0-baseline", metisSource: "baseline", instrumentation: "controller-lease-only", command: CODEX_METIS_COMMAND, commands: { codex: CODEX_METIS_COMMAND, claude: CLAUDE_METIS_COMMAND }, setupByHost: BASELINE_SETUP_BY_HOST },
-  { name: "metis-1.0.0-candidate", metisSource: "candidate", command: CODEX_METIS_COMMAND, commands: { codex: CODEX_METIS_COMMAND, claude: CLAUDE_METIS_COMMAND }, setupByHost: METIS_SETUP_BY_HOST },
+  { name: "metis-1.0.1-candidate", metisSource: "candidate", command: CODEX_METIS_COMMAND, commands: { codex: CODEX_METIS_COMMAND, claude: CLAUDE_METIS_COMMAND }, setupByHost: METIS_SETUP_BY_HOST },
   { name: "plain-host", command: CODEX_COMMAND, commands: { codex: CODEX_COMMAND, claude: CLAUDE_COMMAND } }
 ]);
 
@@ -1708,7 +1708,7 @@ export function compareBenchmarkVariants(db, name, baselineVariant, candidateVar
   invariant(name, "BENCHMARK_NAME", "Specify a benchmark name.");
   invariant(baselineVariant && candidateVariant, "BENCHMARK_VARIANTS", "Specify baseline and candidate variants.");
   const rows = benchmarkRows(db, name);
-  const requiredSuite = baselineVariant === "metis-pre-1.0-baseline" && candidateVariant === "metis-1.0.0-candidate";
+  const requiredSuite = baselineVariant === "metis-pre-1.0-baseline" && candidateVariant === "metis-1.0.1-candidate";
   const officialResults = [];
   if (requiredSuite) {
     invariant(options.baselineCommit && options.candidateCommit && options.baselineCommit !== options.candidateCommit, "BENCHMARK_PROVENANCE", "Required comparisons need distinct baseline and candidate commit evidence.");
