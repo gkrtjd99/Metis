@@ -15,6 +15,30 @@ function indexPath(root, name = "repository-index.json") {
   return path.join(root, ".metis", "generated", name);
 }
 
+function buildRepositorySyncChildCode() {
+  const modulePath = (relative) => JSON.stringify(path.resolve(relative));
+  return [
+    "import { openDatabase } from " + modulePath("src/core/db.js") + ";",
+    "import { ensureConfig } from " + modulePath("src/core/config.js") + ";",
+    "import { syncRepository } from " + modulePath("src/core/repository.js") + ";",
+    "const root = process.argv[1];",
+    "const db = openDatabase(root);",
+    "try {",
+    "  const result = syncRepository(db, root, ensureConfig(root), null, { force: true });",
+    "  process.stdout.write(JSON.stringify({ cached: result.cached, scanId: result.scan.id }));",
+    "} finally {",
+    "  db.close();",
+    "}"
+  ].join("\n");
+}
+
+function spawnRepositorySyncChild(root, childCode) {
+  return spawn(process.execPath, ["--no-warnings", "--input-type=module", "-e", childCode, root], {
+    cwd: path.resolve("."),
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+}
+
 test("repository sync cache hits without changing scan or generated-index timestamps", () => {
   const { root, config, db } = makeProject();
   try {
@@ -170,23 +194,8 @@ test("a later process waits for and recovers an expired repository lease", async
       WHERE resource = ?
     `).run("test-owner", new Date(Date.now() + 60_000).toISOString(), timestamp, resource);
 
-    const childCode = `
-      import { openDatabase } from ${JSON.stringify(path.resolve("src/core/db.js"))};
-      import { ensureConfig } from ${JSON.stringify(path.resolve("src/core/config.js"))};
-      import { syncRepository } from ${JSON.stringify(path.resolve("src/core/repository.js"))};
-      const root = process.argv[1];
-      const db = openDatabase(root);
-      try {
-        const result = syncRepository(db, root, ensureConfig(root), null, { force: true });
-        process.stdout.write(JSON.stringify({ cached: result.cached, scanId: result.scan.id }));
-      } finally {
-        db.close();
-      }
-    `;
-    const child = spawn(process.execPath, ["--no-warnings", "--input-type=module", "-e", childCode, root], {
-      cwd: path.resolve("."),
-      stdio: ["ignore", "pipe", "pipe"]
-    });
+    const childCode = buildRepositorySyncChildCode();
+    const child = spawnRepositorySyncChild(root, childCode);
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => { stdout += chunk; });

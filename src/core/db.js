@@ -141,15 +141,15 @@ let savepointSequence = 0;
 export function transaction(db, fn) {
   if (db.isTransaction) {
     savepointSequence += 1;
-    const savepoint = `metis_sp_${savepointSequence}`;
-    db.exec(`SAVEPOINT ${savepoint}`);
+    const savepoint = "metis_sp_" + savepointSequence;
+    db.exec("SAVEPOINT " + savepoint);
     try {
       const result = fn();
-      db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+      db.exec("RELEASE SAVEPOINT " + savepoint);
       return result;
     } catch (error) {
-      try { db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`); } catch {}
-      try { db.exec(`RELEASE SAVEPOINT ${savepoint}`); } catch {}
+      try { db.exec("ROLLBACK TO SAVEPOINT " + savepoint); } catch {}
+      try { db.exec("RELEASE SAVEPOINT " + savepoint); } catch {}
       throw error;
     }
   }

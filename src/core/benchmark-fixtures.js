@@ -241,7 +241,7 @@ function initializeGit(workspace) {
   const check = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: workspace, encoding: "utf8" });
   if (check.status !== 0) {
     const initialized = spawnSync("git", ["init", "-q"], { cwd: workspace, encoding: "utf8" });
-    if (initialized.status !== 0) throw new Error(`Unable to initialize fixture git repository: ${initialized.stderr || initialized.error}`);
+    if (initialized.status !== 0) throw new Error("Unable to initialize fixture git repository: " + (initialized.stderr || initialized.error));
   }
   spawnSync("git", ["add", "-A"], { cwd: workspace, encoding: "utf8" });
   spawnSync("git", ["-c", "user.name=Metis", "-c", "user.email=metis@local", "commit", "-qm", "benchmark fixture baseline", "--allow-empty"], { cwd: workspace, encoding: "utf8" });
@@ -256,7 +256,7 @@ function initializeGit(workspace) {
  */
 export function primeGitWorktreeAdministration(workspace) {
   const result = spawnSync("git", ["rev-parse", "--git-path", "worktrees"], { cwd: workspace, encoding: "utf8" });
-  if (result.status !== 0) throw new Error(`Unable to locate Git worktree administration: ${result.stderr || result.error}`);
+  if (result.status !== 0) throw new Error("Unable to locate Git worktree administration: " + (result.stderr || result.error));
   const adminPath = result.stdout.trim();
   if (!adminPath) throw new Error("Git did not return a worktree administration path.");
   mkdirSync(path.isAbsolute(adminPath) ? adminPath : path.resolve(workspace, adminPath), { recursive: true, mode: 0o700 });
@@ -269,6 +269,38 @@ function pathExistsOrThrow(workspace, relative) {
   return file;
 }
 
+function buildBenchmarkEvaluator(serialized, readableWorkspace, token) {
+  return [
+    "import { readFileSync } from \"node:fs\";",
+    "import path from \"node:path\";",
+    "import { pathToFileURL } from \"node:url\";",
+    "const contract = " + serialized + ";",
+    "const workspace = " + JSON.stringify(readableWorkspace) + ";",
+    "const success = " + JSON.stringify(token) + ";",
+    "const write = process.stdout.write.bind(process.stdout);",
+    "const load = (relative) => import(pathToFileURL(path.join(workspace, relative)).href + \"?verify=\" + Math.random());",
+    "for (const item of contract.behavior) {",
+    "  if (item.kind === \"trivial\") { const { answer } = await load(\"src/value.js\"); if (answer() !== 42) throw new Error(\"answer() did not return 42\"); }",
+    "  else if (item.kind === \"slice\") { const module = await load(\"src/slice-\" + item.index + \".js\"); if (module[item.exported]() !== \"slice-\" + item.index + \"-complete\") throw new Error(\"slice is incomplete\"); }",
+    "  else if (item.kind === \"consumer\") { const module = await load(\"src/\" + (item.exported === \"consumeA\" ? \"consumer-a\" : \"consumer-b\") + \".js\"); if (module[item.exported]({ id: \"r1\", label: \"Record\" }) !== item.interfaceHash + \":\" + item.prefix + \":Record\") throw new Error(\"consumer does not honor frozen interface\"); }",
+    "  else if (item.kind === \"policy\") { const { planAttempts } = await load(\"src/retry-policy.js\"); const input = JSON.parse(readFileSync(path.join(workspace, \"src/policy-input.json\"), \"utf8\")); if (JSON.stringify(planAttempts(input)) !== JSON.stringify(item.expected)) throw new Error(\"policy output is incorrect\"); }",
+    "  else if (item.kind === \"host\") { const { renderEffort } = await load(\"src/render-effort.js\"); const input = JSON.parse(readFileSync(path.join(workspace, \"src/adapter-input.json\"), \"utf8\")); if (JSON.stringify(renderEffort(input)) !== JSON.stringify(item.expected)) throw new Error(\"host rendering is incorrect\"); }",
+    "  else throw new Error(\"Unknown behavior contract\");",
+    "}",
+    "write(success);"
+  ].join("\n");
+}
+
+function runBenchmarkEvaluator(workspace, permissionFlag, readableWorkspace, evaluator) {
+  return spawnSync(process.execPath, [permissionFlag, "--allow-fs-read=" + readableWorkspace, "--input-type=module"], {
+    cwd: workspace,
+    encoding: "utf8",
+    input: evaluator,
+    timeout: 30000,
+    env: {}
+  });
+}
+
 async function verifyContract(workspace, name, contract, options = {}) {
   for (const [relative, hash] of Object.entries(contract.immutableHashes)) {
     const file = pathExistsOrThrow(workspace, relative);
@@ -279,33 +311,9 @@ async function verifyContract(workspace, name, contract, options = {}) {
     const readableWorkspace = realpathSync.native(workspace);
     const token = randomBytes(24).toString("hex");
     const serialized = JSON.stringify({ behavior: contract.behavior });
-    const evaluator = `
-      import { readFileSync } from "node:fs";
-      import path from "node:path";
-      import { pathToFileURL } from "node:url";
-      const contract = ${serialized};
-      const workspace = ${JSON.stringify(readableWorkspace)};
-      const success = ${JSON.stringify(token)};
-      const write = process.stdout.write.bind(process.stdout);
-      process.execArgv.length = 0;
-      const load = (relative) => import(pathToFileURL(path.join(workspace, relative)).href + "?verify=" + Math.random());
-      for (const item of contract.behavior) {
-        if (item.kind === "trivial") { const { answer } = await load("src/value.js"); if (answer() !== 42) throw new Error("answer() did not return 42"); }
-        else if (item.kind === "slice") { const module = await load("src/slice-" + item.index + ".js"); if (module[item.exported]() !== "slice-" + item.index + "-complete") throw new Error("slice is incomplete"); }
-        else if (item.kind === "consumer") { const module = await load("src/" + (item.exported === "consumeA" ? "consumer-a" : "consumer-b") + ".js"); if (module[item.exported]({ id: "r1", label: "Record" }) !== item.interfaceHash + ":" + item.prefix + ":Record") throw new Error("consumer does not honor frozen interface"); }
-        else if (item.kind === "policy") { const { planAttempts } = await load("src/retry-policy.js"); const input = JSON.parse(readFileSync(path.join(workspace, "src/policy-input.json"), "utf8")); if (JSON.stringify(planAttempts(input)) !== JSON.stringify(item.expected)) throw new Error("policy output is incorrect"); }
-        else if (item.kind === "host") { const { renderEffort } = await load("src/render-effort.js"); const input = JSON.parse(readFileSync(path.join(workspace, "src/adapter-input.json"), "utf8")); if (JSON.stringify(renderEffort(input)) !== JSON.stringify(item.expected)) throw new Error("host rendering is incorrect"); }
-        else throw new Error("Unknown behavior contract");
-      }
-      write(success);
-    `;
-    const result = spawnSync(process.execPath, [permissionFlag, `--allow-fs-read=${readableWorkspace}`, "--input-type=module"], {
-      cwd: workspace,
-      encoding: "utf8",
-      input: evaluator,
-      timeout: 30000
-    });
-    if (result.status !== 0 || result.error || result.stdout !== token) throw new Error(`Fixture behavior failed: ${result.stderr || result.error || result.stdout}`);
+    const evaluator = buildBenchmarkEvaluator(serialized, readableWorkspace, token);
+    const result = runBenchmarkEvaluator(workspace, permissionFlag, readableWorkspace, evaluator);
+    if (result.status !== 0 || result.error || result.stdout !== token) throw new Error("Fixture behavior failed: " + (result.stderr || result.error || result.stdout));
   }
   // Defense in depth: permission-restricted tests cannot write, and a second
   // hash check also catches any external mutation during the verification.

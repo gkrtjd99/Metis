@@ -21,6 +21,7 @@ import { hashFileContents } from "./hash.js";
 import { runtimeArea } from "./paths.js";
 import { listProjectFiles } from "./repository.js";
 import { storeObject } from "./objects.js";
+import { assertNoSymlinkTraversal } from "./security.js";
 import {
   activateIntegrationJournal,
   removeIntegrationJournal,
@@ -66,6 +67,36 @@ function physicalPath(value) {
   const parent = path.dirname(absolute);
   if (parent === absolute) return absolute;
   try { return path.join(realpathSync.native(parent), path.basename(absolute)); } catch { return absolute; }
+}
+
+const SAFE_TASK_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/u;
+
+export function isSafeTaskId(value) {
+  return typeof value === "string" && isSafeRepoPath(value) && SAFE_TASK_ID.test(value);
+}
+
+function isContainedPath(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative !== "" && relative !== ".."
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
+}
+
+function validateTaskWorktreePath(root, candidate) {
+  const absoluteRoot = path.resolve(root);
+  const absoluteCandidate = path.resolve(candidate);
+  const resolved = assertNoSymlinkTraversal(
+    absoluteRoot,
+    path.relative(absoluteRoot, absoluteCandidate),
+    { code: "WORKTREE_PATH_INVALID" }
+  );
+  const physicalRoot = physicalPath(absoluteRoot);
+  const physicalCandidate = path.resolve(physicalRoot, resolved.relative);
+  invariant(
+    isContainedPath(physicalRoot, physicalCandidate),
+    "WORKTREE_PATH_INVALID",
+    `Task worktree path escapes the worktree root: ${candidate}.`
+  );
 }
 
 function snapshotEntry(root, relative) {
@@ -172,6 +203,7 @@ function removeGitWorktree(projectRoot, worktreePath, { ignoreMissing = false } 
 
 export function prepareTaskWorkspace(db, run, task, config) {
   const started = performance.now();
+  const fence = Number(task.attempt_fence);
   const operationId = `wt_${task.id}_${task.attempt_fence}_${Date.now()}`;
   performanceEvent(db, run.id, "performance.worktree-queue", { operationId, taskId: task.id, attemptFence: Number(task.attempt_fence), phase: "start" });
   if (task.readOnly) {
@@ -179,13 +211,14 @@ export function prepareTaskWorkspace(db, run, task, config) {
     performanceEvent(db, run.id, "performance.worktree-queue", { operationId, taskId: task.id, durationMs: performance.now() - started, phase: "shared" });
     return { mode: "shared", path: run.project_root, baseRef: run.baseline_ref };
   }
+  const directory = path.join(runtimeArea(run.project_root, "worktrees"), run.id);
+  const worktreePath = path.join(directory, `${task.id}-f${fence}`);
+  validateTaskWorktreePath(runtimeArea(run.project_root, "worktrees"), worktreePath);
+  invariant(isSafeTaskId(task.id), "TASK_ID_INVALID", "Task ID must be a single safe portable path component.");
   validateMutableOwnershipPaths(run.project_root, task.targetPaths);
   invariant(String(config.worktrees?.mode ?? "required") === "required", "WORKTREE_MODE_REQUIRED", "Mutable tasks require Git worktree isolation.");
   invariant(gitAvailable(run.project_root), "WORKTREE_GIT_REQUIRED", "Mutable tasks require a Git repository with a valid HEAD.");
-  const directory = path.join(runtimeArea(run.project_root, "worktrees"), run.id);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const fence = Number(task.attempt_fence);
-  const worktreePath = path.join(directory, `${task.id}-f${fence}`);
   removeGitWorktree(run.project_root, worktreePath, { ignoreMissing: true });
   const createStarted = performance.now();
   const added = git(run.project_root, ["worktree", "add", "--detach", worktreePath, "HEAD"]);
@@ -226,7 +259,7 @@ export function acquireIntegrationLock(db, runId, seconds) {
   const name = "main-workspace";
   const ownerToken = integrationOwnerToken();
   const timeoutMs = Math.max(1000, Number(seconds) * 1000);
-  db.exec(`PRAGMA busy_timeout = ${Math.floor(timeoutMs)}`);
+  db.exec("PRAGMA busy_timeout = " + Math.floor(timeoutMs));
   try {
     db.exec("BEGIN IMMEDIATE");
   } catch (error) {
