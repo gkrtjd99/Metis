@@ -26,6 +26,7 @@ import {
 } from "./lifecycle-lanes.js";
 import { transaction } from "./db.js";
 import { assertController } from "./ownership.js";
+import { ownerRelayRequests } from "./owner-relay.js";
 import { MetisError, invariant } from "./errors.js";
 
 // Drive is deliberately a small deterministic reducer.  It may perform only
@@ -570,6 +571,8 @@ export function nextControllerAction(db, projectRoot, runId, config, options = {
   const advance = advanceAction(db, projectRoot, run);
   if (advance) return advance;
   const state = taskState(tasks, run.phase);
+  const ownedByRunningCoordinator = (task) => task.parent_task_id && tasks.some((parent) => parent.id === task.parent_task_id && parent.role === "coordinator" && parent.status === "running");
+  state.blocked = state.blocked.filter((task) => !ownedByRunningCoordinator(task));
   if (run.phase === "discover") validateStablePredesignTasks(db, run, tasks, config);
   if (state.blocked.length > 0) {
     const undiagnosed = state.blocked.find((blocked) => !tasks.some((task) => task.role === "diagnostician" && taskReferences(task, blocked.id)));
@@ -607,7 +610,7 @@ export function nextControllerAction(db, projectRoot, runId, config, options = {
     const schedulerBatches = db.prepare(`
       SELECT id, status, claimed_task_ids_json, spawned_task_ids_json, updated_at, controller_fencing_token
       FROM scheduler_batches
-      WHERE run_id = ? AND status IN ('claimed','prepared','partially-spawned','spawned','aborted')
+      WHERE run_id = ? AND parent_task_id IS NULL AND status IN ('claimed','prepared','partially-spawned','spawned','aborted')
       ORDER BY created_at
     `).all(run.id).map((row) => {
       const spawnedTaskIds = parseJson(row.spawned_task_ids_json, []);
@@ -643,10 +646,16 @@ export function nextControllerAction(db, projectRoot, runId, config, options = {
     const batches = schedulerBatches.map((batch) => batch.id);
     const heartbeatBatches = schedulerBatches.filter((batch) => !batch.stalePreparation);
     const stalePreparation = schedulerBatches.filter((batch) => batch.stalePreparation);
+    const ownerRelay = ownerRelayRequests(db, run.id, config);
     return {
       type: "WAIT_FOR_AGENTS",
       phase: run.phase,
-      taskIds: state.running.map((item) => item.id),
+      taskIds: state.running.filter((item) => !ownedByRunningCoordinator(item)).map((item) => item.id),
+      ownerManagedChildren: state.running.filter(ownedByRunningCoordinator).length,
+      ownerRelay,
+      ...(ownerRelay.requests.length ? {
+        ownerRelayInstruction: "Ready 상태의 owner batch만 최상위 host에서 metis relay read <batch-id>로 읽고 생성·ACK를 대행하세요. ownerHostReceipt로 알림을 전달하고 결과 판단은 owner에 맡기세요. 재조회 시 중복 생성하지 말고 Main credentials를 하위로 전달하지 마세요."
+      } : {}),
       schedulerBatchIds: batches,
       schedulerBatches,
       heartbeatSeconds: Math.min(Number(config.controller.heartbeatSeconds), Number(config.orchestration.leaseHeartbeatSeconds)),

@@ -9,7 +9,8 @@ import { repositoryCodeFingerprint, syncRepository } from "./repository.js";
 import { getArtifact, getRun, latestArtifact, putArtifact, recordEvent, touchRun } from "./state.js";
 import { ensureDefaultMilestone, getMilestone, listMilestones, refreshMilestoneStatuses, validateMilestoneGraph } from "./milestones.js";
 import { evidenceRefIsCurrent, evidenceRefIsVerifiable, evidenceSummary, normalizeEvidenceRefs } from "./provenance.js";
-import { escalateModelRoute, selectModelRoute } from "./model-routing.js";
+import { escalateModelRoute, getCoordinatorChildRouteContext, selectModelRoute } from "./model-routing.js";
+import { ownerVerificationGaps } from "./owner-authority.js";
 import { countTokens } from "./tokens.js";
 import { REVIEW_ROLES as REVIEW_ROLE_NAMES, ROLES as ROLE_NAMES } from "./metadata.js";
 import { ROLE_PROTOCOLS, defaultTaskKind, resultSchemaForRole, subjectEvidenceRequirement, validateTaskKind } from "./prompt-protocols.js";
@@ -541,11 +542,13 @@ export function addTask(db, runId, input, config) {
 
   const parentTaskId = field(input, "parentTaskId", "ParentTaskId", null);
   let delegationDepth = Number(field(input, "delegationDepth", "DelegationDepth", 0));
+  let coordinatorChildContext = null;
   if (parentTaskId) {
     const parent = getTask(db, parentTaskId);
     invariant(parent.run_id === run.id, "TASK_PARENT_RUN", "Parent task must belong to the same run.");
     invariant(parent.role === "coordinator", "TASK_PARENT_ROLE", "Only a coordinator can own child tasks.");
     delegationDepth = Number(parent.delegation_depth) + 1;
+    coordinatorChildContext = getCoordinatorChildRouteContext(parent);
   }
   invariant(Number.isInteger(delegationDepth) && delegationDepth >= 0, "TASK_DELEGATION_DEPTH", "Delegation depth must be a non-negative integer.");
   invariant(delegationDepth <= Number(config.orchestration.maxDelegationDepth), "TASK_DELEGATION_LIMIT", `Task delegation depth exceeds ${config.orchestration.maxDelegationDepth}.`);
@@ -585,6 +588,10 @@ export function addTask(db, runId, input, config) {
 
   const route = selectModelRoute(config, role, {
     host: run.host,
+    coordinatorChildContext,
+    risk, effort,
+    capabilities: capabilityNames,
+    specialist: field(input, "specialist", "Specialist", null),
     complexity: field(input, "complexity", "Complexity", "medium"),
     modelTier: field(input, "modelTier", "ModelTier", null),
     model: field(input, "model", "Model", undefined),
@@ -1809,6 +1816,8 @@ export function finishTask(db, projectRoot, runId, taskId, leaseToken, input, co
     const children = db.prepare("SELECT id, status FROM tasks WHERE parent_task_id = ?").all(task.id);
     const nonTerminalChildren = children.filter((item) => !["completed", "waived"].includes(item.status));
     invariant(nonTerminalChildren.length === 0, "COORDINATOR_CHILDREN_NON_TERMINAL", `Coordinator ${task.id} cannot finish before its child tasks.`, { children: nonTerminalChildren });
+    const gaps = ownerVerificationGaps(db, task.id);
+    invariant(gaps.length === 0, "OWNER_VERIFICATION_REQUIRED", "Owner 완료에는 변경 작업에 의존하는 독립 verifier가 필요합니다.", { taskIds: gaps });
   }
   const baseline = baselineForTask(db, run, task);
   let completionReservation = reserveTaskCompletion(db, task, leaseToken, effectiveConfig);

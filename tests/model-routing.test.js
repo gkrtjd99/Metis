@@ -7,7 +7,13 @@ import test from "node:test";
 import { DEFAULT_CONFIG } from "../src/core/config.js";
 import { databasePath, openDatabase } from "../src/core/db.js";
 import { SCHEMA_VERSION } from "../src/core/metadata.js";
-import { EFFORT_ORDER, escalateModelRoute, negotiateEffort, selectModelRoute } from "../src/core/model-routing.js";
+import {
+  EFFORT_ORDER,
+  escalateModelRoute,
+  getCoordinatorChildRouteContext,
+  negotiateEffort,
+  selectModelRoute
+} from "../src/core/model-routing.js";
 import { SCHEMA_SQL } from "../src/core/schema.js";
 import { addTask, getTask, retryTask } from "../src/core/tasks.js";
 import { forcePhase, makeProject, startTestRun } from "./helpers.js";
@@ -47,12 +53,19 @@ test("ordinary workers remain model-neutral until the host selects a model", () 
     capabilityStatus: "deferred",
     reasoningEffort: "high"
   });
-  for (const role of ["scout", "researcher", "coordinator", "curator"]) {
+  for (const role of ["scout", "researcher", "curator"]) {
     const workerRoute = selectModelRoute(codex, role, { modelTier: "worker" });
     assert.equal(workerRoute.tier, "worker", role);
     assert.equal(workerRoute.model, null, role);
     assert.equal(workerRoute.modelSource, "none", role);
   }
+});
+
+test("coordinators default to the strong tier and high effort", () => {
+  const route = selectModelRoute(config({ host: "codex" }), "coordinator", { modelTier: "worker" });
+  assert.equal(route.tier, "strong");
+  assert.equal(route.requestedEffort, "high");
+  assert.equal(route.reasoningEffort, "high");
 });
 
 test("benchmark-only effort policy permits schema-safe low effort for strong orchestration roles", () => {
@@ -198,6 +211,82 @@ test("strong roles remain model-neutral unless explicitly configured", () => {
     assert.equal(route.tier, "strong", role);
     assert.equal(route.model, null, role);
   }
+});
+
+test("only verified direct coordinator children opt reviewer and verifier into the worker path", () => {
+  const codex = config({
+    host: "codex",
+    models: {
+      defaults: { codex: { worker: "configured-worker" } },
+      capabilities: { codex: { models: { "configured-worker": ["low", "medium", "high"] } } }
+    }
+  });
+  const context = getCoordinatorChildRouteContext({ role: "coordinator" });
+  assert.deepEqual(context, { verified: true, direct: true, parentRole: "coordinator" });
+  assert.equal(getCoordinatorChildRouteContext({ role: "worker" }), null);
+
+  const bounded = selectModelRoute(codex, "verifier", {
+    coordinatorChildContext: context,
+    risk: "low",
+    effort: "small"
+  });
+  assert.equal(bounded.tier, "worker");
+  assert.equal(bounded.model, "configured-worker");
+  assert.equal(bounded.modelSource, "host-default");
+  assert.equal(bounded.requestedEffort, "medium");
+  assert.equal(bounded.effectiveEffort, "medium");
+
+  const untrusted = selectModelRoute(codex, "verifier", {
+    parentTaskId: "coordinator-1",
+    risk: "low",
+    effort: "small"
+  });
+  assert.equal(untrusted.tier, "strong");
+  assert.equal(untrusted.requestedEffort, "high");
+});
+
+test("bounded coordinator children retain the strong floor for risk, size, and specialist capability", () => {
+  const codex = config({ host: "codex" });
+  const context = getCoordinatorChildRouteContext({ role: "coordinator" });
+  for (const input of [
+    { risk: "high", effort: "small" },
+    { risk: "medium", effort: "large" },
+    { risk: "low", effort: "small", specialist: "security" },
+    { risk: "low", effort: "small", capabilities: ["database"] }
+  ]) {
+    const route = selectModelRoute(codex, "reviewer", { ...input, coordinatorChildContext: context });
+    assert.equal(route.tier, "strong", JSON.stringify(input));
+    assert.equal(route.requestedEffort, "high", JSON.stringify(input));
+  }
+});
+
+test("bounded children preserve task and role model override precedence", () => {
+  const context = getCoordinatorChildRouteContext({ role: "coordinator" });
+  const codex = config({
+    host: "codex",
+    models: {
+      defaults: { codex: { worker: "worker-default" } },
+      routes: { verifier: { tier: "strong", model: "role-model", reasoningEffort: "high" } }
+    }
+  });
+  const taskModel = selectModelRoute(codex, "verifier", {
+    coordinatorChildContext: context,
+    risk: "medium",
+    effort: "medium",
+    model: "task-model"
+  });
+  assert.equal(taskModel.tier, "worker");
+  assert.equal(taskModel.model, "task-model");
+  assert.equal(taskModel.modelSource, "task");
+
+  const roleModel = selectModelRoute(codex, "verifier", {
+    coordinatorChildContext: context,
+    risk: "medium",
+    effort: "medium"
+  });
+  assert.equal(roleModel.tier, "worker");
+  assert.equal(roleModel.model, "role-model");
+  assert.equal(roleModel.modelSource, "role");
 });
 
 test("strong and specialist roles cannot be downgraded through a worker-tier override", () => {

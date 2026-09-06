@@ -66,7 +66,17 @@ test("spawn descriptors make the fenced terminal self-finish unavoidable", () =>
       task_id: taskId,
       lease,
       result_file: descriptor.terminal_handoff.result_file,
-      command: `cd '/repo' && $METIS --root '/repo' task finish '${taskId}' --lease '${lease}' --file '${descriptor.terminal_handoff.result_file}' --pretty`
+      command: `cd '/repo' && $METIS --root '/repo' task finish '${taskId}' --lease '${lease}' --file '${descriptor.terminal_handoff.result_file}' --pretty`,
+      invocation: {
+        executable: process.execPath,
+        args: [
+          '--no-warnings',
+          path.resolve(process.cwd(), 'src/cli.js'),
+          '--root', '/repo', 'task', 'finish', taskId,
+          '--lease', lease, '--file', descriptor.terminal_handoff.result_file, '--pretty'
+        ],
+        cwd: '/repo'
+      }
     });
     assert.match(descriptor.message, /MANDATORY TERMINAL HANDOFF/u);
     assert.match(descriptor.message, /The file is the durable completion input/u);

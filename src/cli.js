@@ -111,6 +111,8 @@ import { compileTaskPacket, getTaskPacket, listTaskPackets, taskPacketStatus } f
 import { currentPlanDraftBinding, ingestPlanDraft } from "./core/plan-ingest.js";
 import { configureModels, modelConfigView, resetModels } from "./core/model-config.js";
 import { assertSupportedNodeVersion } from "./runtime/node-version.js";
+import { abortOwnerBatch, acknowledgeOwnerSpawn, claimOwnerSchedule, heartbeatOwner, ownerBatchStatus, ownerChildFailure, ownerNext } from "./core/owner.js";
+import { ownerRelayRequests, readOwnerRelayBatch } from "./core/owner-relay.js";
 
 const HELP = `Metis CLI
 
@@ -181,6 +183,12 @@ Planning and orchestration:
   metis schedule child-failure <batch-id> <task-id> --data '{"code":"server_overloaded"}'
   metis schedule status <batch-id>
   metis task add|get|list|runnable|contract|claim|heartbeat|finish|retry|waive ...
+  metis owner next|claim|heartbeat|status <owner-task-id> --lease <owner-lease> [--batch id] [--limit N]
+  metis owner ack <owner-task-id> --lease <owner-lease> --batch id --receipts '<json>' [--tasks id1,id2]
+  metis owner abort <owner-task-id> --lease <owner-lease> --batch id --reason '<reason>'
+  metis owner child-failure <owner-task-id> --lease <owner-lease> --batch id --task id --data '<json>'
+  metis relay list
+  metis relay read <batch-id>  (Main controller credentials required; does not spawn)
 
 Product delivery:
   metis browser add [--file file | --data json | stdin]
@@ -411,6 +419,7 @@ const CONTROLLER_MUTATIONS = new Set([
   "task add", "task claim", "task retry", "task waive", "task packet compile",
   "design seal", "design review", "plan seal", "plan review", "plan ingest",
   "schedule claim", "schedule ack", "schedule heartbeat", "schedule abort", "schedule child-failure",
+  "relay list", "relay read",
   "review ingest", "review status", "review reconcile", "verification candidate",
   "finding add", "finding status", "decision add", "decision status",
   "check detect", "check add", "check run",
@@ -530,6 +539,37 @@ async function dispatch(positionals, flags, context) {
   }
 
   context.controller = guardController(db, flags, config, positionals);
+
+  if (top === "relay") {
+    const run = resolveRun(db, flags);
+    if (key === "relay list") return ownerRelayRequests(db, run.id, config);
+    if (key === "relay read") return readOwnerRelayBatch(db, run.id, positionals[2], context.controller, config);
+    throw new MetisError("OWNER_RELAY_COMMAND", "지원되지 않는 relay 명령입니다.");
+  }
+
+  if (top === "owner") {
+    const run = resolveRun(db, flags);
+    const ownerTaskId = positionals[2];
+    invariant(ownerTaskId && typeof flags.lease === "string", "OWNER_LEASE_REQUIRED", "Owner task ID와 --lease가 필요합니다.");
+    const args = [db, projectRoot, run.id, ownerTaskId, flags.lease, config];
+    if (key === "owner next") return ownerNext(...args);
+    if (key === "owner claim") return claimOwnerSchedule(...args, { limit: integer(flags.limit, undefined) });
+    if (key === "owner heartbeat") return heartbeatOwner(...args, flags.batch ?? null);
+    if (key === "owner status") return flags.batch ? ownerBatchStatus(...args, flags.batch) : ownerNext(...args);
+    invariant(typeof flags.batch === "string", "OWNER_BATCH_REQUIRED", "이 owner 작업에는 --batch가 필요합니다.");
+    if (key === "owner ack") return acknowledgeOwnerSpawn(...args, flags.batch,
+      flags.tasks ? String(flags.tasks).split(",").filter(Boolean) : null,
+      jsonFlag(flags.receipts, null));
+    if (key === "owner abort") {
+      invariant(typeof flags.reason === "string" && flags.reason.trim(), "OWNER_ABORT_REASON", "Batch 중단 이유가 필요합니다.");
+      return abortOwnerBatch(...args, flags.batch, flags.reason);
+    }
+    if (key === "owner child-failure") {
+      invariant(typeof flags.task === "string", "OWNER_CHILD_REQUIRED", "실패한 하위 --task가 필요합니다.");
+      return ownerChildFailure(...args, flags.batch, flags.task, await inputJson(flags));
+    }
+    throw new MetisError("OWNER_COMMAND", "지원되지 않는 owner 명령입니다.");
+  }
 
   if (key === "controller materialize") {
     const run = resolveRun(db, flags);

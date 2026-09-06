@@ -234,6 +234,26 @@ Canonical database path:
     "maxContextRefs": 24,
     "maxDependencySummaries": 12,
     "maxResolvedContextChars": 8000,
+    "ownerExecution": {
+      "hosts": {
+        "claude": {
+          "childSpawning": false,
+          "evidence": null,
+          "mode": null
+        },
+        "codex": {
+          "childSpawning": false,
+          "evidence": null,
+          "mode": null
+        },
+        "opencode": {
+          "childSpawning": false,
+          "evidence": null,
+          "mode": null
+        }
+      },
+      "maxConcurrentChildren": 4
+    },
     "requireReadyTaskPacket": true,
     "scheduleByWave": true
   },
@@ -364,8 +384,8 @@ Canonical database path:
       },
       "coordinator": {
         "model": null,
-        "reasoningEffort": "medium",
-        "tier": "worker"
+        "reasoningEffort": "high",
+        "tier": "strong"
       },
       "curator": {
         "model": null,
@@ -579,6 +599,12 @@ Planning and orchestration:
   metis schedule child-failure <batch-id> <task-id> --data '{"code":"server_overloaded"}'
   metis schedule status <batch-id>
   metis task add|get|list|runnable|contract|claim|heartbeat|finish|retry|waive ...
+  metis owner next|claim|heartbeat|status <owner-task-id> --lease <owner-lease> [--batch id] [--limit N]
+  metis owner ack <owner-task-id> --lease <owner-lease> --batch id --receipts '<json>' [--tasks id1,id2]
+  metis owner abort <owner-task-id> --lease <owner-lease> --batch id --reason '<reason>'
+  metis owner child-failure <owner-task-id> --lease <owner-lease> --batch id --task id --data '<json>'
+  metis relay list
+  metis relay read <batch-id>  (Main controller credentials required; does not spawn)
 
 Product delivery:
   metis browser add [--file file | --data json | stdin]
