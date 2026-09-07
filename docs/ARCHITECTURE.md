@@ -1,6 +1,9 @@
 # Architecture
 
-Metis 1.0.1 uses schema version 11, configuration version 6, and runtime layout version 4.
+Metis 1.1.0 local release-candidate preparation retains schema version 11,
+configuration version 6, and runtime layout version 4. No migration is required.
+The latest public release remains 1.0.1. Local preparation results and the
+native execution-stage evidence boundary are recorded in `VERIFICATION.md`.
 
 ## System purpose
 
@@ -117,6 +120,22 @@ Subagents perform the actual engineering work.
 
 Each child receives one Task Packet and no Main transcript.
 
+## Owner/coordinator execution boundary
+
+Owner execution is disabled by default. Enabling it requires explicit capability
+and host evidence at the execution boundary; a configuration value alone is not
+sufficient. When enabled, a strong-tier owner/coordinator may dispatch direct
+children on a lower-cost route, but every child still receives explicit scope,
+lease, authority, and ancestry fences. The host relays actual independent
+receipts through the common adapter ABI. Main receives only bounded structured
+state and receipt references, never raw child output.
+
+The supported evidence path is owner → worker → independent verifier →
+same-owner resume → completion. This is bounded execution-stage evidence for
+Claude Code and Codex, not proof of full real-plan E2E, multi-owner real
+parallelism, failure recovery, or performance improvement. Nested Agent
+execution is not automatically supported or assumed.
+
 ## Persistent phase machine
 
 ## Lifecycle profiles and controller drive
@@ -200,7 +219,7 @@ The runtime invalidates downstream state.
 
 ## Universal task graph
 
-Metis 1.0.1 uses tasks for the complete lifecycle.
+Metis 1.1.0 preparation retains tasks for the complete lifecycle.
 Implementation is not a special scheduling system.
 
 Task kinds:
@@ -650,5 +669,6 @@ Runtime layout:
 
 ## Version boundary
 
-Version 1.0.1 rejects incompatible schema and configuration versions.
-New projects create runtime state with the canonical versions above.
+The 1.1.0 preparation retains rejection of incompatible schema and
+configuration versions. New projects create runtime state with the canonical
+versions above; no schema, configuration, or layout migration is needed.

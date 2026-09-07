@@ -1,11 +1,12 @@
-# Metis 1.0.1
+# Metis 1.1.0
 
 [English](../README.md) | [한국어](README.ko.md)
 
 Metis는 장기 repository 목표를 위한 subagent 우선 engineering
 오케스트레이터입니다. Codex, Claude Code, OpenCode용 adapter preview를 통해
 discovery, research, design, planning, implementation, review, verification을
-구조화합니다. 1.0.1은 현재 public release입니다.
+구조화합니다. **1.1.0은 로컬 release candidate/preparation 상태이며 public
+release가 아닙니다. 현재 public release는 1.0.1입니다.**
 
 Managed goal 하나를 시작하면 됩니다.
 
@@ -28,25 +29,28 @@ Metis는 목표를 완료하거나 사용자 또는 외부 권한의 명시적�
 Release package는 macOS(darwin)와 Linux만 지원합니다. Windows는 지원 대상이
 아닙니다.
 
-1.0.1 host 상태:
+1.1.0 release candidate/preparation host 상태:
 
 | Host | 상태 | Release evidence |
 | --- | --- | --- |
-| Codex | E2E 검증 preview | Package-equivalent release candidate에서 native goal lifecycle 통과; exact tag 재검증 대기 |
-| Claude Code | Adapter preview | 설치, contract, spawn descriptor 검증 완료; native goal E2E 대기 |
-| OpenCode | Adapter preview | 설치와 generic spawn contract 검증 완료; native goal E2E 대기 |
+| Codex | 실제 실행 단계 통합 검사 통과 | 실제 host receipt, immutable test hash, audited database state와 함께 owner → worker → independent verifier → same-owner resume 완료 |
+| Claude Code | 실제 실행 단계 통합 검사 통과 | 동일한 제한된 execution-stage flow를 실제 host receipt, immutable test hash, audited database state로 확인 |
+| OpenCode | Adapter preview | 설치와 generic spawn contract 검증 완료; native host execution evidence는 아직 대기 |
 
 Package test 통과를 native-host E2E 증거로 간주하지 않습니다. 인증된 release
 환경에서 goal 시작부터 verification까지 전체 flow가 통과한 host만 supported로
 승격합니다.
 
-1.0.1은 pinned security 및 supply-chain CI, npm lockfile과 Dependabot 및
-SECURITY policy, scanner-safe fixture, 명시적인 benchmark child environment,
-task-ID/worktree containment으로 release integrity를 강화합니다. 이는
-validation과 containment control이며, untrusted-code sandbox를 의미하지
-않습니다. 이번 release는 성능 향상을 주장하지 않습니다.
+1.1.0 candidate preparation은 owner/coordinator 제어, strong-tier coordinator와
+직접 child low-cost 작업, 명시적인 scope와 lease fence, common ABI를 통한
+host-relay actual independent receipt, bounded Main context, security metadata
+false-positive 수정을 포함합니다. `ownerExecution` 기본값은 off이며 명시적인
+capability evidence가 있어야 켤 수 있습니다. 중첩 Agent 실행의 자동 지원은
+주장하지 않습니다. 이는 validation과 containment control이며 성능 향상 주장이
+아닙니다. 공개 직전에는 최종 release commit을 기준으로 다시 검증해야 합니다.
+패키징과 공개 배포의 구분은 [릴리즈 준비 절차](RELEASING.md)를 참조하세요.
 
-[`v1.0.1` release](https://github.com/gkrtjd99/Metis/releases/tag/v1.0.1)에서
+최신 public release인 [`v1.0.1` release](https://github.com/gkrtjd99/Metis/releases/tag/v1.0.1)에서
 `metis-orchestrator-1.0.1.tgz`를 내려받아 설치합니다.
 
 ```sh

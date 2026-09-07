@@ -1,7 +1,9 @@
 # Operations
 
-Metis 1.0.1 runs one managed repository objective through a subagent-first lifecycle.
-Main remains the controller.
+Metis 1.1.0 local release-candidate preparation runs one managed repository
+objective through a subagent-first lifecycle. The latest public release remains
+1.0.1. Local preparation checks are recorded in `VERIFICATION.md`; publication
+is a separate step described in `RELEASING.md`. Main remains the controller.
 Fresh subagents perform repository inspection, research, design, planning, implementation, review, verification, diagnosis, and curation.
 
 ## Install
@@ -24,6 +26,8 @@ metis doctor --pretty
 ```
 
 The plugin remains passive until the user writes the literal `$metis` marker.
+The install example above names the latest public 1.0.1 archive; 1.1.0 is only
+being prepared locally and must not be described as published.
 
 Before starting a goal, the host must expose the globally installed Metis
 plugin/command surface: `/metis` must resolve and `/goal $metis "<objective>"`
@@ -130,6 +134,26 @@ Main context contains the Goal Contract, current phase, blockers, requirements, 
 It does not contain complete Task Packets or child transcripts.
 
 Raw source, long logs, patches, screenshots, check output, and detailed child results remain in runtime objects and artifacts.
+
+## Owner/coordinator execution
+
+`ownerExecution` is off by default. Enable it only when the host supplies
+explicit capability evidence and the runtime records that evidence at the spawn
+boundary. A strong-tier owner/coordinator may use direct children on a low-cost
+route, but scope, leases, authority, and full coordinator ancestry remain
+mandatory. The host relays actual independent receipts through the common ABI;
+synthetic or prose-only receipts do not count.
+
+The bounded execution-stage evidence path is:
+
+```text
+owner -> worker -> independent verifier -> same-owner resume -> complete
+```
+
+This path has been exercised for Claude Code and Codex with actual receipts,
+an immutable test hash, and audited database state. It does not establish full
+real-plan E2E, multi-owner real parallelism, failure recovery, or performance
+improvement. Nested Agent execution is not automatically supported.
 
 ## Subagent lifecycle
 
@@ -553,6 +577,10 @@ metis benchmark compare repository-goals metis-pre-1.0-baseline metis-1.0.1-cand
   --baseline-commit <baseline-sha> \
   --candidate-commit <candidate-sha>
 ```
+
+`metis-pre-1.0-baseline` and `metis-1.0.1-candidate` are existing comparison
+presets required by the benchmark suite. Keep these historical identifiers;
+they are not 1.1.0 performance evidence and no new benchmark claim is made.
 
 The official comparison fails closed unless both commits exist, differ, the
 candidate equals the clean checkout at `HEAD`, every durable result names the

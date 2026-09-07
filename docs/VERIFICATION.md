@@ -1,7 +1,11 @@
 # Verification
 
-Metis 1.0.1 verifies both the runtime control plane and the subagent-first workflow contract.
-The release suite must pass from source and from the packed npm archive.
+Metis 1.1.0 release preparation verifies the runtime control plane and the
+subagent-first workflow contract. The local 1.1.0 package check passed with
+466 tests passing, zero failures, and one Chromium-unavailable skip out of 467.
+This includes offline tarball installation and installed CLI initialization.
+1.1.0 remains unpublished; repeat the suite against the final release commit
+before publication.
 
 ## Release command
 
@@ -20,13 +24,24 @@ JavaScript syntax checks
   -> complete Node.js test suite
 ```
 
+The bounded native execution-stage evidence currently recorded for Claude Code
+and Codex is: owner → worker → independent verifier → same-owner resume →
+complete, with actual host receipts, an immutable test hash, and audited
+SQLite state. These actual CLI checks passed on commit `162dbff` before the
+version-only release preparation; the runtime implementation has not changed
+in this preparation. The fixture's `forcePhase` supplies plan-stage setup, so
+the passed flow covers execution rather than autonomous plan generation.
+Multi-owner real parallelism, real-host failure recovery, and performance
+improvement were not measured by this smoke test. The local 1.1.0 package result
+above was obtained separately after the version and conformance-test updates.
+
 Generate the reference after changing metadata, defaults, layout, or CLI help:
 
 ```sh
 npm run docs:generate
 ```
 
-## 1.0.1 orchestration coverage
+## 1.1.0 candidate orchestration coverage
 
 The performance release coverage additionally verifies:
 
@@ -261,9 +276,9 @@ repository scan, preserve differing files under `force=false`, and report the
 `no-run`, live-controller, expired-controller, paused, and completed routes
 without automatic takeover.
 
-The packed archive must include the 1.0.1 Task Packet, interface, plan-ingestion,
-and role runtime surfaces. Development tests remain in Git for CI and are
-excluded from the installable package.
+The packed archive for the eventual 1.1.0 release must include the current Task
+Packet, interface, plan-ingestion, and role runtime surfaces. Development tests
+remain in Git for CI and are excluded from the installable package.
 
 ## Native host boundary
 
@@ -272,8 +287,10 @@ The normal release suite validates host adapters, installed role files, task con
 Actual native Codex, Claude Code, and OpenCode end-to-end tests require those CLIs to be installed and authenticated in the release environment.
 If they are unavailable, the release metadata must state that limitation.
 A green package suite must not be described as a native-host agent-spawn test.
-For 1.0.1, all three native host integrations remain adapter previews until
-that release-environment evidence is recorded.
+For the 1.1.0 preparation, Claude Code and Codex have only the bounded
+execution-stage evidence described above; they are not thereby promoted to a
+final supported release. OpenCode remains an adapter preview. Full native
+release-environment evidence is still pending.
 
 ## Release evidence
 
@@ -288,16 +305,20 @@ A release record should contain:
 - browser smoke availability and result;
 - schema, configuration, and runtime layout versions.
 
-The canonical 1.0.1 versions are:
+The prepared 1.1.0 versions are:
 
 ```text
-package: 1.0.1
+package: 1.1.0
 schema: 11
 configuration: 6
 runtime layout: 4
 ```
 
+Schema, configuration, and runtime layout remain unchanged from the latest
+public 1.0.1 release; no migration is required.
+
 The benchmark variant `metis-pre-1.0-baseline` intentionally names the
 historical pre-1.0 source. Separate compatibility fixtures describe the
-unmodified 1.0.0 schema. The current release candidate is
-`metis-1.0.1-candidate`; none of these names is a performance claim.
+unmodified 1.0.0 schema. The existing comparison preset remains `metis-1.0.1-candidate`; it is a
+historical required-suite identifier, not 1.1.0 performance evidence. None of
+these names is a performance claim.

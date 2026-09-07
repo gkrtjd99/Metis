@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.1.0 - Unreleased
+
+Release preparation; 1.1.0 has not been published.
+
+- Added owner lifecycle commands for coordinators to claim, monitor, verify,
+  and complete an approved direct-child subtree using task leases rather than
+  Main controller credentials.
+- Added the shared Claude/Codex host-relay path and versioned spawn ABI, with
+  independent owner/worker/verifier receipt checks and attempt/controller fences.
+- Route coordinators to the strong tier and eligible bounded children to the
+  worker tier while preserving explicit model choices. Bound Main context by
+  owner and apply global and per-owner concurrency limits.
+- Keep `ownerExecution` off by default and require explicit capability evidence.
+- Corrected a scanner false positive in a test-only lease token and synchronized
+  plugin source metadata, command frontmatter, and packaged license/security files.
+- Extended package conformance checks with offline installation, installed CLI
+  initialization, and owner/relay runtime and security-document inclusion.
+- Recorded the bounded Claude Code and Codex execution-stage evidence path:
+  owner → worker → independent verifier → same-owner resume, with actual
+  receipts, immutable test hash, and audited database state.
+- Kept schema 11, configuration 6, and runtime layout 4 unchanged; no migration
+  is required. Nested Agent execution is not claimed as automatic support.
+- Full real-plan E2E, multi-owner real parallelism, failure recovery, and
+  performance improvement remain unverified.
+
 ## 1.0.1 - 2026-08-15
 
 Security and release-readiness hardening for the current release.
