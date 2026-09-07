@@ -6,6 +6,8 @@
     "name": "Austin"
   },
   "license": "MIT",
+  "homepage": "https://github.com/gkrtjd99/Metis#readme",
+  "repository": "https://github.com/gkrtjd99/Metis",
   "keywords": [
     "agents",
     "orchestration",

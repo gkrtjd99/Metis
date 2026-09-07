@@ -24,7 +24,7 @@ function options(overrides = {}) {
   return {
     batchId: "batch-123",
     attemptFence: 7,
-    leaseToken: "lease-123",
+    leaseToken: "example-lease-token",
     parentRoot: "/repo/main",
     workspacePath: "/repo/worktree",
     workspaceMode: "git-worktree",
@@ -46,7 +46,7 @@ test("Claude and Codex expose the same versioned spawn ABI", () => {
     assert.equal(descriptor.attempt_fence, 7);
     assert.equal(descriptor.completion_owner, "owner-123");
     assert.equal(descriptor.terminal_handoff.task_id, "child-task");
-    assert.equal(descriptor.terminal_handoff.lease, "lease-123");
+    assert.equal(descriptor.terminal_handoff.lease, "example-lease-token");
   }
   const commonFields = (descriptor) => ({
     protocol: descriptor.protocol,

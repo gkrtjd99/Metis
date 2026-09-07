@@ -31,6 +31,7 @@
     "src/",
     "CHANGELOG.md",
     "LICENSE",
+    "SECURITY.md",
     "README.md"
   ],
   "scripts": {

@@ -59,6 +59,8 @@ const codex = parse(".codex-plugin/plugin.json");
 assert.equal(codex.name, "metis");
 assert.equal(codex.version, version);
 assert.equal(codex.skills, "./skills/");
+assert.equal(codex.homepage, packageJson.homepage);
+assert.equal(codex.repository, "https://github.com/gkrtjd99/Metis");
 assert.equal(codex.commands, undefined, "Metis must not shadow Codex native /goal.");
 assert.match(JSON.stringify(codex.interface), /\/goal \$metis/);
 assert.equal(existsSync(absolute("plugin.json")), false, "A root plugin manifest would change Codex discovery semantics.");
@@ -67,6 +69,10 @@ const claude = parse(".claude-plugin/plugin.json");
 assert.equal(claude.name, "metis");
 assert.equal(claude.version, version);
 assert.equal(parse("adapters/claude/.claude-plugin/plugin.json").version, version);
+assert.ok(packageJson.files.includes("SECURITY.md"));
+for (const document of ["LICENSE", "SECURITY.md"]) {
+  assertMirror(document, [`adapters/claude/${document}`, `adapters/opencode/${document}`]);
+}
 
 assert.equal(existsSync(absolute("skills/goal")), false);
 assert.equal(existsSync(absolute("commands/goal.md")), false);
@@ -165,6 +171,7 @@ assertMirror("skills/model/agents/openai.yaml", [
 
 const command = read("commands/metis.md");
 assert.match(command, /^---\ndescription:/);
+assert.match(command, /^name: metis$/m);
 assert.match(command, /\$ARGUMENTS/);
 assert.match(command, /\$metis/);
 assert.match(command, /subagent-first/i);

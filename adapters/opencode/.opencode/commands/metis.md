@@ -1,5 +1,6 @@
 ---
 description: Explicitly run one repository objective through the Metis subagent-first workflow. Native /goal remains unchanged.
+name: metis
 ---
 
 Use the `$metis` skill for this objective:
