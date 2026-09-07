@@ -35,7 +35,15 @@ export const DEFAULT_CONFIG = Object.freeze({
     diagnoseBeforeRetry: true,
     maxContextRefs: 24,
     maxResolvedContextChars: 8000,
-    maxDependencySummaries: 12
+    maxDependencySummaries: 12,
+    ownerExecution: {
+      maxConcurrentChildren: 4,
+      hosts: {
+        codex: { mode: null, childSpawning: false, evidence: null },
+        claude: { mode: null, childSpawning: false, evidence: null },
+        opencode: { mode: null, childSpawning: false, evidence: null }
+      }
+    }
   },
   budgets: {
     mainContextTokens: 3000,
@@ -114,7 +122,7 @@ export const DEFAULT_CONFIG = Object.freeze({
       "plan-critic": { tier: "strong", model: null, reasoningEffort: "high" },
       "task-compiler": { tier: "strong", model: null, reasoningEffort: "high" },
       worker: { tier: "worker", model: null, reasoningEffort: "high" },
-      coordinator: { tier: "worker", model: null, reasoningEffort: "medium" },
+      coordinator: { tier: "strong", model: null, reasoningEffort: "high" },
       integrator: { tier: "strong", model: null, reasoningEffort: "high" },
       diagnostician: { tier: "strong", model: null, reasoningEffort: "high" },
       reviewer: { tier: "strong", model: null, reasoningEffort: "high" },

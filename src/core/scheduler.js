@@ -21,6 +21,7 @@ import { renderSpawnDescriptor } from "../adapters/spawn-descriptors.js";
 import { cleanupTaskWorkspace, prepareTaskWorkspace } from "./worktrees.js";
 import { json, makeId, now, parseJson } from "./util.js";
 import { compileTaskPacket, taskPacketStatus } from "./task-packets.js";
+import { assertOwnerBatchSession, assertOwnerSession, assertOwnerSpawnReceipts, ownerHostCapability } from "./owner-authority.js";
 
 const ROLE_WEIGHT = Object.freeze({
   "design-critic": 100,
@@ -81,9 +82,10 @@ function rootVisibility(task, parentTaskId) {
   return task.parent_task_id === null || task.parent_task_id === undefined;
 }
 
-function earliestOpenWave(tasks, phase) {
+function earliestOpenWave(tasks, phase, parentTaskId = null) {
   const open = tasks.filter((task) => (
-    task.phase === phase
+    (!parentTaskId || task.parent_task_id === parentTaskId)
+    && task.phase === phase
     && !["completed", "waived"].includes(task.status)
     && !(task.role === "coordinator" && task.status === "running")
   ));
@@ -130,6 +132,8 @@ export function proposeSchedule(db, projectRoot, runId, config, options = {}) {
   const run = getRun(db, runId);
   const allTasks = listTasks(db, run.id);
   const parentTaskId = options.parentTaskId ?? null;
+  const ownerSession = options.ownerLease
+    ? assertOwnerSession(db, run.id, parentTaskId, options.ownerLease, config) : null;
   const rawRunnable = allTasks
     .filter((task) => graphRunnable(task, allTasks, db, run.phase))
     .filter((task) => rootVisibility(task, parentTaskId));
@@ -138,7 +142,7 @@ export function proposeSchedule(db, projectRoot, runId, config, options = {}) {
     .filter((task) => rootVisibility(task, parentTaskId));
   const subjectReadyCandidates = conflictFree
     .filter((task) => subjectReady(db, projectRoot, run.id, task));
-  const wave = config.delegation?.scheduleByWave === false ? null : earliestOpenWave(allTasks, run.phase);
+  const wave = config.delegation?.scheduleByWave === false ? null : earliestOpenWave(allTasks, run.phase, ownerSession ? parentTaskId : null);
   let candidates = wave === null
     ? subjectReadyCandidates
     : subjectReadyCandidates.filter((task) => Number(task.wave ?? 1) === wave);
@@ -160,7 +164,11 @@ export function proposeSchedule(db, projectRoot, runId, config, options = {}) {
   const budget = budgetStatus(db, run.id);
   const spawnRemaining = budget.remaining.agentSpawns ?? slots;
   const requestedLimit = Number(options.limit ?? config.orchestration.maxConcurrent);
-  const limit = Math.max(0, Math.min(requestedLimit, slots, spawnRemaining));
+  const ownerSlots = ownerSession
+    ? Math.max(0, Number(config.delegation.ownerExecution.maxConcurrentChildren)
+      - allTasks.filter((task) => task.parent_task_id === parentTaskId && task.status === "running").length)
+    : slots;
+  const limit = Math.max(0, Math.min(requestedLimit, slots, ownerSlots, spawnRemaining));
   const criticalPath = criticalPathLengths(allTasks);
   const ordered = candidates
     .map((task) => ({ task, score: taskScore(task, criticalPath) }))
@@ -168,7 +176,15 @@ export function proposeSchedule(db, projectRoot, runId, config, options = {}) {
   let researchRemaining = budget.remaining.researchCalls;
   const selected = [];
   const deferredCandidates = [];
+  if (ordered.some(({ task }) => task.role === "coordinator") && ownerHostCapability(config, run.host).supported) {
+    invariant(Number(config.orchestration.maxConcurrent) >= 2, "OWNER_CONCURRENCY", "Owner와 하위 agent를 실행하려면 공통 슬롯이 최소 2개 필요합니다.");
+  }
   for (const candidate of ordered) {
+    if (candidate.task.role === "coordinator" && ownerHostCapability(config, run.host).supported
+        && running + selected.length >= Number(config.orchestration.maxConcurrent) - 1) {
+      deferredCandidates.push({ ...candidate, deferredReason: "owner 하위 작업을 위한 공통 실행 슬롯 예약" });
+      continue;
+    }
     if (selected.length >= limit) {
       deferredCandidates.push({ ...candidate, deferredReason: limit === 0 ? "no concurrency or spawn budget" : "lower deterministic score in the active wave" });
       continue;
@@ -487,9 +503,12 @@ function preparedContract(db, config, host, batchId, item, task) {
     workspaceMode: rawContract.WorkspaceMode,
     contract,
     spawn: renderSpawnDescriptor(host, task, contract, {
+      ownerCapability: task.role === "coordinator" ? ownerHostCapability(config, host) : null,
       batchId,
       attemptFence: item.attemptFence,
       leaseToken: item.leaseToken,
+      workspacePath: rawContract.RepositoryRoot,
+      workspaceMode: rawContract.WorkspaceMode,
       parentRoot: rawContract.IntegrationRoot ?? task.run_project_root ?? rawContract.RepositoryRoot
     })
   };
@@ -545,8 +564,15 @@ export function claimSchedule(db, projectRoot, runId, config, options = {}) {
     assertAttemptTokenBudget(db, run.id, proposal.batch, config);
     const controllerFence = Number(options.controllerFencingToken ?? run.controller_fencing_token);
     invariant(controllerFence === Number(run.controller_fencing_token), "CONTROLLER_FENCED", "The scheduler controller token is stale.");
+    const ownerSession = options.ownerLease
+      ? assertOwnerSession(db, run.id, options.parentTaskId, options.ownerLease, config) : null;
+    if (ownerSession) {
+      invariant(Number(ownerSession.owner.attempt_fence) === Number(options.ownerAttemptFence), "OWNER_FENCED", "Owner attempt가 변경되었습니다.");
+      const runningChildren = currentTasks.filter((task) => task.parent_task_id === options.parentTaskId && task.status === "running").length;
+      invariant(runningChildren + proposal.batch.length <= Number(config.delegation.ownerExecution.maxConcurrentChildren), "OWNER_CONCURRENCY", "Owner 하위 동시 실행 한도를 초과했습니다.");
+    }
     if (config.delegation?.scheduleByWave !== false) {
-      const wave = earliestOpenWave(currentTasks, run.phase);
+      const wave = earliestOpenWave(currentTasks, run.phase, ownerSession ? options.parentTaskId : null);
       invariant(proposal.batch.every((item) => Number(item.wave) === Number(wave)), "SCHEDULER_WAVE_RACE", "The earliest open wave changed before this batch could be claimed.", {
         proposedWave: proposal.wave, currentWave: wave
       });
@@ -579,7 +605,8 @@ export function claimSchedule(db, projectRoot, runId, config, options = {}) {
       `).run(resource, item.taskId, leaseToken, attemptFence, owner, expiresAt, now());
         provisional.push({ resource, task_id: item.taskId });
       }
-      claimed.push({ ...item, attemptFence, leaseToken, expiresAt });
+      claimed.push({ ...item, attemptFence, leaseToken, expiresAt,
+        ...(ownerSession ? { ownerAttemptFence: Number(ownerSession.owner.attempt_fence) } : {}) });
     }
     db.prepare(`
       INSERT INTO scheduler_batches(
@@ -647,6 +674,7 @@ export function claimSchedule(db, projectRoot, runId, config, options = {}) {
     transaction(db, () => {
       const run = getRun(db, runId);
       const batch = batchRecord(db, batchId);
+      if (options.ownerLease) assertOwnerSession(db, runId, options.parentTaskId, options.ownerLease, config);
       if (batch.status !== "claimed") throw stalePreparationError(batchId, `batch is ${batch.status}`);
       invariant(
         Number(batch.controller_fencing_token) === Number(run.controller_fencing_token),
@@ -729,6 +757,10 @@ export function acknowledgeScheduleSpawn(db, runId, batchId, taskIds, owner, con
     const unknown = [...selected].filter((taskId) => !batch.claimedTaskIds.includes(taskId));
     invariant(unknown.length === 0, "SCHEDULER_ACK_TASK", "Spawn acknowledgement contains tasks outside this batch.", { unknown });
     const receiptByTask = receiptMap(receipts, selected, batch, batchId);
+    if (batch.batch.some((item) => Object.hasOwn(item, "ownerAttemptFence"))) {
+      const session = assertOwnerBatchSession(db, batch, config);
+      assertOwnerSpawnReceipts(db, session, receiptByTask);
+    }
     const toAck = batch.batch.filter((item) => selected.has(item.taskId) && !persisted.has(item.taskId));
     const inserted = [];
     if (toAck.length > 0) {

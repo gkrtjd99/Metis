@@ -1,11 +1,11 @@
-# Metis 1.0.1
+# Metis 1.1.0
 
 [English](README.md) | [한국어](docs/README.ko.md)
 
 Metis is a subagent-first engineering orchestrator for long repository goals.
 It provides Codex, Claude Code, and OpenCode adapter previews for structured
 discovery, research, design, planning, implementation, review, and
-verification. This is the current public release.
+verification. **1.1.0 is the current public release.**
 
 Start one managed goal:
 
@@ -28,31 +28,34 @@ Requirements:
 The release package supports macOS (darwin) and Linux only. Windows is not a
 supported installation target.
 
-Host status for 1.0.1:
+Host status for the 1.1.0 public release:
 
 | Host | Status | Release evidence |
 | --- | --- | --- |
-| Codex | E2E-verified preview | Native goal lifecycle passed on the package-equivalent release candidate; exact-tag rerun pending |
-| Claude Code | Adapter preview | Installation, contracts, and spawn descriptors tested; native goal E2E pending |
-| OpenCode | Adapter preview | Installation and generic spawn contract tested; native goal E2E pending |
+| Codex | Execution-stage integration passed | Owner → worker → independent verifier → same-owner resume reached completion with actual host receipts, immutable test hash, and audited database state |
+| Claude Code | Execution-stage integration passed | The same bounded execution-stage flow was observed with actual host receipts, immutable test hash, and audited database state |
+| OpenCode | Adapter preview | Installation and generic spawn contract tested; native host execution evidence remains pending |
 
 Do not treat a green package test as native-host E2E evidence. Promote a host
 to supported only after the complete goal-to-verification flow passes in an
 authenticated release environment.
 
-Release 1.0.1 hardens release integrity with pinned security and supply-chain
-CI, a committed npm lockfile with Dependabot and SECURITY policy, scanner-safe
-fixtures, explicit benchmark child environments, and task-ID/worktree
-containment.
-These are validation and containment controls; this release makes no
-performance claim.
+The 1.1.0 release adds owner/coordinator control,
+strong-tier coordinator routing with direct-child low-cost work, explicit scope
+and lease fences, actual independent receipts relayed by the host through a
+common ABI, bounded Main context, and a security-metadata false-positive fix.
+`ownerExecution` remains off by default and requires explicit capability
+evidence; nested Agent execution is not claimed as automatic support. These
+are validation and containment controls, not a performance claim. See the
+[release guide](docs/RELEASING.md) for the current release record and future
+packaging and publication procedure.
 
-Download `metis-orchestrator-1.0.1.tgz` from the
-[v1.0.1 release](https://github.com/gkrtjd99/Metis/releases/tag/v1.0.1), then
+Download the latest public `metis-orchestrator-1.1.0.tgz` from the
+[v1.1.0 release](https://github.com/gkrtjd99/Metis/releases/tag/v1.1.0), then
 install it:
 
 ```sh
-npm install -g ./metis-orchestrator-1.0.1.tgz
+npm install -g ./metis-orchestrator-1.1.0.tgz
 ```
 
 Or install directly from the GitHub source:

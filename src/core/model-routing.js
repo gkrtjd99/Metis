@@ -1,4 +1,4 @@
-import { MODEL_ROUTE_GROUPS } from "./metadata.js";
+import { COORDINATOR_CHILD_ROLES, MODEL_ROUTE_GROUPS, SPECIALIST_CAPABILITIES } from "./metadata.js";
 
 // Effort is a policy value shared by every host.  Host adapters negotiate it
 // against their model's capabilities before rendering a host-specific spawn.
@@ -8,8 +8,12 @@ const COMPLEXITY_EFFORT = Object.freeze({ low: "low", medium: "medium", high: "h
 const DEFAULT_EFFORT = "medium";
 
 const ORDINARY_WORKER_ROLES = new Set(MODEL_ROUTE_GROUPS.ordinary);
+const COORDINATOR_CHILD_ROLE_SET = new Set(COORDINATOR_CHILD_ROLES);
+const SPECIALIST_CAPABILITY_SET = new Set(SPECIALIST_CAPABILITIES);
 const STRONG_ROLE_FLOOR = new Set(MODEL_ROUTE_GROUPS.strong);
 const HOLD_CAUSES = new Set(["transient", "external", "contract", "dependency", "plan"]);
+const TASK_RISKS = new Set(["low", "medium", "high", "critical"]);
+const TASK_EFFORTS = new Set(["small", "medium", "large"]);
 
 export function normalizeEffort(value, fallback = DEFAULT_EFFORT) {
   const candidate = String(value ?? "").trim().toLowerCase();
@@ -108,7 +112,7 @@ function concreteModel(value) {
 }
 
 function hostDefaultModel(config, host, role, tier) {
-  if (tier !== "worker" || !ORDINARY_WORKER_ROLES.has(role)) return null;
+  if (tier !== "worker") return null;
   const normalizedHost = String(host ?? config.host ?? "").trim().toLowerCase();
   return concreteModel(config.models?.defaults?.[normalizedHost]?.[tier]);
 }
@@ -162,16 +166,58 @@ function deferModelNeutralEffort(model, requested, negotiated) {
   };
 }
 
+// 호출자는 실제 부모 task를 조회해야 하며, parent_task_id만으로 저비용 경로를 허용하지 않는다.
+export function getCoordinatorChildRouteContext(parent) {
+  const parentRole = String(parent?.role ?? parent?.Role ?? "").trim().toLowerCase();
+  if (parentRole !== "coordinator") return null;
+  return Object.freeze({ verified: true, direct: true, parentRole: "coordinator" });
+}
+
+function hasVerifiedCoordinatorParent(input) {
+  const context = input?.coordinatorChildContext;
+  return context?.verified === true
+    && context?.direct === true
+    && String(context?.parentRole ?? "").trim().toLowerCase() === "coordinator";
+}
+
+function hasSpecialistCapability(input) {
+  const specialist = String(input?.specialist ?? "").trim().toLowerCase();
+  if (SPECIALIST_CAPABILITY_SET.has(specialist)) return true;
+  const capabilities = [
+    ...(Array.isArray(input?.capabilities) ? input.capabilities : []),
+    ...(Array.isArray(input?.specialistCapabilities) ? input.specialistCapabilities : [])
+  ];
+  return capabilities.some((capability) => {
+    const name = typeof capability === "string" ? capability : capability?.name;
+    return SPECIALIST_CAPABILITY_SET.has(String(name ?? "").trim().toLowerCase());
+  });
+}
+
+function isBoundedCoordinatorChild(role, complexity, input) {
+  if (!COORDINATOR_CHILD_ROLE_SET.has(role)) return false;
+  if (complexity === "high") return false;
+  if (!hasVerifiedCoordinatorParent(input)) return false;
+  const risk = String(input?.risk ?? "").trim().toLowerCase();
+  const effort = String(input?.effort ?? "").trim().toLowerCase();
+  if (!TASK_RISKS.has(risk) || !["low", "medium"].includes(risk)) return false;
+  if (!TASK_EFFORTS.has(effort) || !["small", "medium"].includes(effort)) return false;
+  return !hasSpecialistCapability(input);
+}
+
 export function selectModelRoute(config, role, input = {}) {
   const complexity = normalizedComplexity(input.complexity);
   const base = config.models?.routes?.[role] ?? { tier: "worker", model: null, reasoningEffort: "high" };
+  const boundedChild = isBoundedCoordinatorChild(role, complexity, input);
   let route = { ...base };
   if (complexity === "high" && route.tier === "worker") route = { ...route, tier: "strong", reasoningEffort: "high" };
-  if (input.modelTier && (input.modelTier !== "worker" || ORDINARY_WORKER_ROLES.has(role))) route.tier = input.modelTier;
-  if (STRONG_ROLE_FLOOR.has(role)) route.tier = "strong";
+  if (input.modelTier && (input.modelTier !== "worker" || ORDINARY_WORKER_ROLES.has(role) || boundedChild)) route.tier = input.modelTier;
+  if (boundedChild && input.modelTier !== "strong") route.tier = "worker";
+  if (STRONG_ROLE_FLOOR.has(role) && !boundedChild) route.tier = "strong";
+  const boundedWorker = boundedChild && route.tier === "worker";
 
   const policy = config.models?.effortPolicy?.ordinaryWorker;
-  const configuredEffort = input.reasoningEffort ?? route.reasoningEffort
+  const configuredEffort = input.reasoningEffort
+    ?? (boundedWorker ? "medium" : route.reasoningEffort)
     ?? (route.tier === "worker" && ORDINARY_WORKER_ROLES.has(role) ? policy?.initial : null)
     ?? (route.tier === "strong" ? config.models?.effortPolicy?.strongRole?.initial : null)
     ?? COMPLEXITY_EFFORT[complexity] ?? DEFAULT_EFFORT;
@@ -184,7 +230,7 @@ export function selectModelRoute(config, role, input = {}) {
     ? config.models?.benchmark?.efforts?.[role]
     : null;
   if (benchmarkEffortPolicy) requested = normalizeEffort(benchmarkEffortPolicy, requested);
-  if (STRONG_ROLE_FLOOR.has(role) && !benchmarkEffortPolicy) requested = EFFORT_INDEX.get(requested) < EFFORT_INDEX.get("high") ? "high" : requested;
+  if (STRONG_ROLE_FLOOR.has(role) && !boundedWorker && !benchmarkEffortPolicy) requested = EFFORT_INDEX.get(requested) < EFFORT_INDEX.get("high") ? "high" : requested;
 
   const tier = route.tier ?? "worker";
   const selection = resolveModelSelection(config, input.host, role, tier, input.model, base.model);

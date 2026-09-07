@@ -40,7 +40,7 @@ function assertMirror(canonical, mirrors) {
   for (const mirror of mirrors) assert.equal(read(mirror), content, `${mirror} differs from ${canonical}`);
 }
 
-assert.equal(version, "1.0.1");
+assert.equal(version, "1.1.0");
 assert.equal(packageJson.engines.node, ">=22.16.0");
 assert.deepEqual(packageJson.exports, {
   ".": "./src/index.js",
@@ -59,6 +59,8 @@ const codex = parse(".codex-plugin/plugin.json");
 assert.equal(codex.name, "metis");
 assert.equal(codex.version, version);
 assert.equal(codex.skills, "./skills/");
+assert.equal(codex.homepage, packageJson.homepage);
+assert.equal(codex.repository, "https://github.com/gkrtjd99/Metis");
 assert.equal(codex.commands, undefined, "Metis must not shadow Codex native /goal.");
 assert.match(JSON.stringify(codex.interface), /\/goal \$metis/);
 assert.equal(existsSync(absolute("plugin.json")), false, "A root plugin manifest would change Codex discovery semantics.");
@@ -67,6 +69,10 @@ const claude = parse(".claude-plugin/plugin.json");
 assert.equal(claude.name, "metis");
 assert.equal(claude.version, version);
 assert.equal(parse("adapters/claude/.claude-plugin/plugin.json").version, version);
+assert.ok(packageJson.files.includes("SECURITY.md"));
+for (const document of ["LICENSE", "SECURITY.md"]) {
+  assertMirror(document, [`adapters/claude/${document}`, `adapters/opencode/${document}`]);
+}
 
 assert.equal(existsSync(absolute("skills/goal")), false);
 assert.equal(existsSync(absolute("commands/goal.md")), false);
@@ -165,6 +171,7 @@ assertMirror("skills/model/agents/openai.yaml", [
 
 const command = read("commands/metis.md");
 assert.match(command, /^---\ndescription:/);
+assert.match(command, /^name: metis$/m);
 assert.match(command, /\$ARGUMENTS/);
 assert.match(command, /\$metis/);
 assert.match(command, /subagent-first/i);
@@ -234,7 +241,7 @@ assert.match(generated, /metis clean --scope cache --dry-run --pretty/);
 assert.match(generated, /metis schedule ack/);
 
 const readme = read("README.md");
-assert.match(readme, /^# Metis 1\.0\.1/m);
+assert.match(readme, /^# Metis 1\.1\.0/m);
 assert.match(readme, /current public release/i);
 assert.match(readme, /## Quick start/i);
 assert.match(readme, /Codex/i);
@@ -250,7 +257,7 @@ assert.match(readme, /metis clean --scope cache --dry-run/);
 assert.match(readme, /\.metis\/state\/state\.db/);
 
 const korean = read("docs/README.ko.md");
-assert.match(korean, /Metis 1\.0\.1/);
+assert.match(korean, /Metis 1\.1\.0/);
 assert.match(korean, /현재 public release/i);
 assert.match(korean, /## 빠른 시작/i);
 assert.match(korean, /Codex, Claude Code, OpenCode/i);
@@ -280,7 +287,7 @@ assert.match(operations, /--allow-repository-exec/);
 assert.match(operations, /There is no `--apply` flag/);
 
 const verification = read("docs/VERIFICATION.md");
-assert.match(verification, /Metis 1\.0\.1/);
+assert.match(verification, /Metis 1\.1\.0/);
 assert.match(verification, /separate Node\.js processes/i);
 assert.match(verification, /native Codex, Claude Code, and OpenCode end-to-end tests/i);
 assert.match(verification, /Task Packet compilation/i);
@@ -310,4 +317,4 @@ for (const file of filesBelow(root).filter((item) => /\.(?:js|mjs)$/u.test(item)
   execFileSync(process.execPath, ["--check", file], { stdio: "pipe" });
 }
 
-console.log("Metis 1.0.1 package structure is valid.");
+console.log("Metis 1.1.0 package structure is valid.");

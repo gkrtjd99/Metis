@@ -40,9 +40,11 @@ export const ROLES = Object.freeze([
 ]);
 
 export const MODEL_ROUTE_GROUPS = Object.freeze({
-  ordinary: Object.freeze(["scout", "researcher", "worker", "coordinator", "curator"]),
-  strong: Object.freeze(ROLES.filter((role) => !["scout", "researcher", "worker", "coordinator", "curator"].includes(role)))
+  ordinary: Object.freeze(["scout", "researcher", "worker", "curator"]),
+  strong: Object.freeze(ROLES.filter((role) => !["scout", "researcher", "worker", "curator"].includes(role)))
 });
+
+export const COORDINATOR_CHILD_ROLES = Object.freeze(["worker", "reviewer", "verifier"]);
 
 export const TASK_KINDS = Object.freeze([
   "discovery",

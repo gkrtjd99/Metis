@@ -90,6 +90,192 @@ function taskSummary(tasks) {
   return Object.entries(counts).sort(([a], [b]) => a.localeCompare(b)).map(([status, count]) => `${status}=${count}`).join(", ") || "none";
 }
 
+function taskParentId(task) {
+  return task?.parent_task_id ?? task?.parentTaskId ?? null;
+}
+
+// Main에는 root task와 최상위 coordinator별 집계만 전달한다.
+// 비정상 plan의 ancestry도 순환 없이 안전하게 처리한다.
+function mainTaskView(tasks, runnable) {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const ownerFor = (task) => {
+    let current = task;
+    let owner = null;
+    const visited = new Set();
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id);
+      if (current.role === "coordinator") owner = current;
+      const parentId = taskParentId(current);
+      if (!parentId) return owner;
+      current = byId.get(parentId) ?? null;
+    }
+    // 순환에는 신뢰할 수 있는 root가 없으므로 이후 root 검증에서 제외한다.
+    return owner;
+  };
+
+  const roots = tasks.filter((task) => !taskParentId(task));
+  const rootCoordinatorIds = new Set(roots.filter((task) => task.role === "coordinator").map((task) => task.id));
+  const aggregates = new Map();
+  for (const task of tasks) {
+    const owner = ownerFor(task);
+    if (!owner || !rootCoordinatorIds.has(owner.id)) continue;
+    let aggregate = aggregates.get(owner.id);
+    if (!aggregate) {
+      aggregate = { id: owner.id, statusCounts: {}, descendantCount: 0, hasDescendantBlocker: false };
+      aggregates.set(owner.id, aggregate);
+    }
+    aggregate.statusCounts[task.status] = (aggregate.statusCounts[task.status] ?? 0) + 1;
+    if (task.id !== owner.id) {
+      aggregate.descendantCount += 1;
+      if (["blocked", "failed"].includes(task.status)) aggregate.hasDescendantBlocker = true;
+    }
+  }
+  const visibleRunnable = runnable.filter((task) => !taskParentId(task));
+  return { roots, visibleRunnable, aggregates, hiddenCount: Math.max(0, tasks.length - roots.length) };
+}
+
+function aggregateSummary(aggregate) {
+  const counts = Object.entries(aggregate.statusCounts)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([status, count]) => `${status}=${count}`)
+    .join(", ") || "none";
+  return `Owner ${aggregate.id}: ${counts} (descendants=${aggregate.descendantCount})`;
+}
+
+function eventPayload(event) {
+  try { return parseJson(event.payload_json, {}); } catch { return {}; }
+}
+
+function eventIds(payload, key) {
+  const value = payload?.[key];
+  if (Array.isArray(value)) return value.filter((item) => typeof item === "string");
+  return typeof value === "string" && value ? [value] : [];
+}
+
+function safeEventPayload(value, depth = 0) {
+  if (depth > 4) return "[truncated]";
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string") return value.length > 240 ? truncateMiddle(value, 240) : value;
+  if (typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.slice(0, 16).map((item) => safeEventPayload(item, depth + 1));
+  const safe = {};
+  for (const [key, item] of Object.entries(value).slice(0, 48)) {
+    if (/reason|receipt|rawresult|resultjson|^result$|secret/i.test(key)) continue;
+    safe[key] = safeEventPayload(item, depth + 1);
+  }
+  return safe;
+}
+
+function ownerEventView(db, runId, tasks, eventRows, eventLimit) {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const taskView = mainTaskView(tasks, []);
+  const rootTaskIds = new Set(taskView.roots.map((task) => task.id));
+  const rootCoordinatorIds = new Set(taskView.roots.filter((task) => task.role === "coordinator").map((task) => task.id));
+  const ownerFor = (taskId) => {
+    const task = byId.get(taskId);
+    if (!task || rootCoordinatorIds.has(task.id)) return null;
+    const roots = taskView.aggregates;
+    let current = task;
+    let owner = null;
+    const visited = new Set();
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id);
+      if (current.role === "coordinator") owner = current;
+      const parentId = taskParentId(current);
+      if (!parentId) break;
+      current = byId.get(parentId) ?? null;
+    }
+    return owner && roots.has(owner.id) ? owner.id : null;
+  };
+  const batchIds = [...new Set(eventRows.flatMap((event) => {
+    const payload = eventPayload(event);
+    return [...eventIds(payload, "batchId"), ...eventIds(payload, "batchIds")];
+  }))];
+  const batches = new Map();
+  if (batchIds.length) {
+    const placeholders = batchIds.map(() => "?").join(",");
+    const rows = db.prepare(`SELECT id, parent_task_id FROM scheduler_batches WHERE run_id = ? AND id IN (${placeholders})`).all(runId, ...batchIds);
+    for (const row of rows) batches.set(row.id, row.parent_task_id);
+  }
+  const childAggregates = new Map();
+  const visible = [];
+  for (const event of eventRows) {
+    const payload = eventPayload(event);
+    const taskIds = [
+      ...eventIds(payload, "taskId"),
+      ...eventIds(payload, "taskIds"),
+      ...eventIds(payload, "parentTaskId")
+    ];
+    const batchIdValues = [...eventIds(payload, "batchId"), ...eventIds(payload, "batchIds")];
+    const owners = new Set(taskIds.map(ownerFor).filter(Boolean));
+    for (const batchId of batchIdValues) {
+      const parentTaskId = batches.get(batchId);
+      const owner = ownerFor(parentTaskId) ?? (rootCoordinatorIds.has(parentTaskId) ? parentTaskId : null);
+      if (owner) owners.add(owner);
+    }
+    const hasUnknownAssociation = taskIds.some((taskId) => !byId.has(taskId))
+      || batchIdValues.some((batchId) => !batches.has(batchId));
+    const hasUnresolvedTask = taskIds.some((taskId) => byId.has(taskId)
+      && !rootTaskIds.has(taskId) && !ownerFor(taskId));
+    const hasUnresolvedBatch = batchIdValues.some((batchId) => {
+      const parentTaskId = batches.get(batchId);
+      return parentTaskId && !rootTaskIds.has(parentTaskId)
+        && !ownerFor(parentTaskId);
+    });
+    if (!owners.size) {
+      // 소유자를 확인할 수 없는 task/batch event는 global event로 취급하지 않는다.
+      if (hasUnknownAssociation || hasUnresolvedTask || hasUnresolvedBatch) continue;
+      visible.push({ ...event, payload: safeEventPayload(payload) });
+      continue;
+    }
+    // child payload는 경계를 넘기지 않고 type/severity/count만 집계한다.
+    for (const ownerId of owners) {
+      const aggregate = childAggregates.get(ownerId) ?? { ownerId, rows: 0, count: 0, types: new Map(), latest: null };
+      aggregate.rows += 1;
+      aggregate.count += Math.max(1, Number(event.count) || 1);
+      aggregate.types.set(event.type, (aggregate.types.get(event.type) ?? 0) + 1);
+      if (!aggregate.latest || String(event.updated_at) > String(aggregate.latest)) aggregate.latest = event.updated_at;
+      childAggregates.set(ownerId, aggregate);
+    }
+  }
+  for (const aggregate of childAggregates.values()) {
+    visible.push({
+      ownerId: aggregate.ownerId,
+      childEventCount: aggregate.count,
+      childEventRows: aggregate.rows,
+      childEventTypes: [...aggregate.types.entries()].sort(([a], [b]) => a.localeCompare(b)),
+      updated_at: aggregate.latest
+    });
+  }
+  return visible
+    .sort((a, b) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")))
+    .slice(0, eventLimit);
+}
+
+function formatEvent(event) {
+  if (event.ownerId) {
+    const types = event.childEventTypes.map(([type, count]) => `${type}${count > 1 ? ` ×${count}` : ""}`).join(", ");
+    return `Owner ${event.ownerId}: child-events=${event.childEventCount} (sampled rows=${event.childEventRows}${types ? `; ${types}` : ""})`;
+  }
+  return `${event.type}${event.count > 1 ? ` ×${event.count}` : ""}: ${JSON.stringify(event.payload)}`;
+}
+
+function displayAction(action, taskView) {
+  const owners = [...taskView.aggregates.values()]
+    .filter((aggregate) => aggregate.hasDescendantBlocker)
+    .map((aggregate) => aggregateSummary(aggregate));
+  if (action?.type !== "FIX_GATE_FAILURES" || taskView.hiddenCount === 0) return action;
+  return {
+    ...action,
+    instruction: owners.length
+      ? `Owner-level descendant blockers require review: ${owners.join("; ")}`
+      : "Descendant task state requires owner-level review.",
+    failures: owners.length
+      ? owners.map((summary) => `Owner-level descendant blocker: ${summary}`)
+      : ["Descendant task state requires owner-level review."]
+  };
+}
+
 function fitSections(db, sections, budget, options) {
   const model = options.model ?? null;
   const config = options.config;
@@ -146,14 +332,19 @@ function activeContract(db, runId) {
 
 function phaseSections(run, data) {
   const {
-    contract, requirements, action, tasks, runnable, milestones, decisions, findings,
+    contract, requirements, action, tasks, runnable, taskView, milestones, decisions, findings,
     staleFindings, checks, pendingDocs, discovery, research, design, planReview,
     workspaceBaseline, reviews, trace, governance, budget, progress, events, materializedKinds
   } = data;
   const activeMilestone = milestones.find((item) => item.id === run.current_milestone_id) ?? milestones.find((item) => !["completed", "waived"].includes(item.status));
   const progressState = progress ?? { stalled: false, stallCount: 0, lastProgressAt: null };
+  const rootTaskLines = taskView.roots.slice(0, 12).map((task) => `${task.id} [${task.status}/${task.role}]: ${task.title}${task.targetPaths?.length ? ` — ${task.targetPaths.join(", ")}` : ""}`);
+  if (taskView.roots.length > rootTaskLines.length) rootTaskLines.push(`... ${taskView.roots.length - rootTaskLines.length} additional root tasks omitted`);
   const blockers = [
-    ...tasks.filter((task) => ["blocked", "failed"].includes(task.status)).map((task) => `Task ${task.id}: ${task.status}`),
+    ...taskView.roots.filter((task) => ["blocked", "failed"].includes(task.status)).map((task) => `Task ${task.id}: ${task.status}`),
+    ...[...taskView.aggregates.values()]
+      .filter((aggregate) => aggregate.hasDescendantBlocker)
+      .map((aggregate) => `Owner ${aggregate.id}: descendant blocker (${aggregateSummary(aggregate)})`),
     ...reviews.blocking.map((item) => `Review ${item.id}: ${item.severity} — ${item.title}`),
     ...governance.blockers.assumptions.map((item) => `Assumption ${item.id}: ${item.statement}`),
     ...governance.blockers.violatedInvariants.map((item) => `Invariant ${item.id}: violated`),
@@ -172,7 +363,7 @@ function phaseSections(run, data) {
     section("budget", "Budget", `- Pass: ${budget.pass}\n- Input: ${budget.usage.inputTokens}/${budget.limits.inputTokens ?? "unbounded"}\n- Output: ${budget.usage.outputTokens}/${budget.limits.outputTokens ?? "unbounded"}\n- Tool calls: ${budget.usage.toolCalls}/${budget.limits.toolCalls ?? "unbounded"}\n- Agent spawns: ${budget.usage.agentSpawns}/${budget.limits.agentSpawns ?? "unbounded"}`, 92),
     section("progress", "Progress Watchdog", `- Stalled: ${progressState.stalled}\n- Stall count: ${progressState.stallCount}\n- Last progress: ${progressState.lastProgressAt ?? "none"}`, 94),
     section("trace", "Traceability", `- Pass: ${trace.pass}\n- Must requirements: ${trace.summary.must}\n- Planned: ${trace.summary.planned}\n- Implemented: ${trace.summary.implemented}\n- Verified: ${trace.summary.verified}\n- Gaps: ${JSON.stringify(trace.summary.uncoveredMust)}`, 96),
-    section("tasks", "Subagent Task Graph", `- Counts: ${taskSummary(tasks)}\n- Active waves: ${[...new Set(tasks.filter((task) => !["completed", "waived"].includes(task.status)).map((task) => task.wave))].sort((a, b) => a - b).join(", ") || "none"}\n- Runnable: ${lineList(runnable.map((task) => `${task.id} [wave ${task.wave}/${task.taskKind}/${task.role}/${task.contractStatus}]: ${task.title}`))}`, 94),
+    section("tasks", "Subagent Task Graph", `- Counts: ${taskSummary(taskView.roots)}\n- Root tasks: ${lineList(rootTaskLines)}\n- Owner subtree counts: ${lineList([...taskView.aggregates.values()].map(aggregateSummary))}\n- Active waves: ${[...new Set(taskView.roots.filter((task) => !["completed", "waived"].includes(task.status)).map((task) => task.wave))].sort((a, b) => a - b).join(", ") || "none"}\n- Runnable: ${lineList(taskView.visibleRunnable.map((task) => `${task.id} [wave ${task.wave}/${task.taskKind}/${task.role}/${task.contractStatus}]: ${task.title}`))}`, 94),
     section("decisions", "Active Decisions", lineList(decisions.map((item) => `${item.id}: ${item.decision}`)), 86),
     section("risks", "Governance", `- Execution pass: ${governance.passForExecution}\n- Completion pass: ${governance.passForCompletion}\n- Open assumptions: ${governance.assumptions.filter((item) => item.status === "open").length}\n- Open risks: ${governance.risks.filter((item) => item.status === "open").length}\n- Violated invariants: ${governance.blockers.violatedInvariants.length}`, 90)
   ];
@@ -183,7 +374,7 @@ function phaseSections(run, data) {
     design: [section("constraints", "Constraints and Invariants", lineList([...(contract?.constraints ?? []), ...governance.invariants.map((item) => `${item.id}: ${item.description}`)]), 96)],
     plan: [section("milestones", "Milestones", lineList(milestones.map((item) => `${item.id}: ${item.status} — ${item.title}; requirements=${item.requirementIds?.join(",") || "none"}`)), 98)],
     execute: [
-      section("ownership", "Execution Ownership", lineList(tasks.filter((task) => task.phase === "execute" && !task.readOnly).map((task) => `${task.id}: ${task.targetPaths.join(", ")}`)), 98),
+      section("ownership", "Execution Ownership", lineList(taskView.roots.filter((task) => task.phase === "execute" && !task.readOnly).map((task) => `${task.id}: ${task.targetPaths.join(", ")}`)), 98),
       section("preexisting", "Pre-existing Changes", lineList(workspaceBaseline?.preexistingChanges ?? []), 88)
     ],
     review: [section("review", "Review State", JSON.stringify({ tasks: reviews.tasks, blocking: reviews.blocking }, null, 2), 99)],
@@ -205,7 +396,7 @@ function phaseSections(run, data) {
       ? JSON.stringify(materializedKinds.has("plan-review") ? { verdict: planReview.verdict, findings: planReview.findings } : planReview, null, 2)
       : "- Not approved", 99)
   ];
-  return [...mandatory, ...common, ...(byPhase[run.phase] ?? []), ...artifactSections, section("events", "Recent High-signal Events", lineList(events.map((event) => `${event.type}${event.count > 1 ? ` ×${event.count}` : ""}: ${JSON.stringify(parseJson(event.payload_json, {}))}`)), 45)];
+  return [...mandatory, ...common, ...(byPhase[run.phase] ?? []), ...artifactSections, section("events", "Recent High-signal Events", lineList(events.map(formatEvent)), 45)];
 }
 
 export function buildMainContext(db, projectRoot, runId, config, requested = null) {
@@ -217,6 +408,7 @@ export function buildMainContext(db, projectRoot, runId, config, requested = nul
   const model = options.model ?? config.budgets.model ?? null;
   const tasks = listTasks(db, run.id);
   const runnable = getRunnableTasks(db, run.id, config.orchestration.maxConcurrent);
+  const taskView = mainTaskView(tasks, runnable);
   const contract = activeContract(db, run.id);
   const requirements = db.prepare("SELECT * FROM requirements WHERE run_id = ? AND status <> 'superseded' ORDER BY priority, id").all(run.id);
   const decisions = listDecisions(db, run.id, "active");
@@ -248,21 +440,32 @@ export function buildMainContext(db, projectRoot, runId, config, requested = nul
   const budget = budgetStatus(db, run.id);
   const progress = progressStatus(db, run.id, config);
   const gate = gateReport(db, projectRoot, run.id);
-  const action = options.action ?? (run.phase === "complete" || run.status === "completed"
+  const ownerWaiting = [...taskView.aggregates.values()].some((aggregate) => (
+    aggregate.descendantCount > 0 && Number(aggregate.statusCounts.running ?? 0) > 0
+  ));
+  const rawAction = options.action ?? (run.phase === "complete" || run.status === "completed"
     ? { type: "COMPLETE" }
     : gate.pass
       ? { type: "ADVANCE_PHASE", command: `metis advance ${gate.to} --pretty`, targetPhase: gate.to }
-      : runnable.length > 0
+      : taskView.visibleRunnable.length > 0
         ? { type: "SPAWN_BATCH", instruction: "Use metis schedule claim --pretty and dispatch the returned bounded contracts." }
-        : { type: "FIX_GATE_FAILURES", instruction: gate.failures.join(" "), failures: gate.failures });
-  const events = db.prepare(`
+        : ownerWaiting
+          ? { type: "WAIT_FOR_AGENTS", instruction: "Wait for the active owner subtree to report completion." }
+          : { type: "FIX_GATE_FAILURES", instruction: gate.failures.join(" "), failures: gate.failures });
+  const action = rawAction;
+  const displayActionValue = displayAction(rawAction, taskView);
+  // child event는 owner 집계로 치환하고 조회·출력을 모두 bounded하게 유지한다.
+  const recentEventBudget = Math.max(1, Number(config.budgets.recentEvents) || 12);
+  const eventSampleLimit = Math.min(256, Math.max(32, recentEventBudget * 4));
+  const eventRows = db.prepare(`
     SELECT type, severity, payload_json, count, updated_at FROM events
     WHERE run_id = ? AND type NOT LIKE 'performance.%'
     ORDER BY updated_at DESC LIMIT ?
-  `).all(run.id, config.budgets.recentEvents);
+  `).all(run.id, eventSampleLimit * 2);
+  const events = ownerEventView(db, run.id, tasks, eventRows, recentEventBudget);
 
   const sections = phaseSections(run, {
-    db, projectRoot, contract, requirements, action, tasks, runnable, milestones, decisions,
+    db, projectRoot, contract, requirements, action: displayActionValue, tasks, runnable, taskView, milestones, decisions,
     findings, staleFindings, checks, pendingDocs, discovery, research, design, planReview,
     workspaceBaseline, reviews, trace, governance, budget, progress, events, materializedKinds
   });

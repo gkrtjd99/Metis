@@ -33,9 +33,9 @@ test("generated reference and structural validation stay current", () => {
   execFileSync(process.execPath, ["scripts/validate.mjs"], { cwd: root, stdio: "pipe" });
 });
 
-test("package release uses the canonical 1.0.1 metadata", () => {
+test("package release uses the canonical 1.1.0 metadata", () => {
   const pkg = readJson("package.json");
-  assert.equal(pkg.version, "1.0.1");
+  assert.equal(pkg.version, "1.1.0");
   assert.equal(pkg.author, "Austin");
   assert.equal(pkg.engines.node, ">=22.16.0");
   assert.deepEqual(pkg.os, ["darwin", "linux"]);
@@ -44,7 +44,11 @@ test("package release uses the canonical 1.0.1 metadata", () => {
   assert.equal(pkg.bugs.url, "https://github.com/gkrtjd99/Metis/issues");
   assert.equal(pkg.homepage, "https://github.com/gkrtjd99/Metis#readme");
   assert.equal(pkg.scripts.prepublishOnly, "npm run check");
+  assert.match(read("CHANGELOG.md"), /^## 1\.1\.0 - (?:Unreleased|\d{4}-\d{2}-\d{2})$/m);
   assert.match(read("CHANGELOG.md"), /^## 1\.0\.1 - 2026-08-15$/m);
+  const lock = readJson("package-lock.json");
+  assert.equal(lock.version, pkg.version);
+  assert.equal(lock.packages[""].version, pkg.version);
   assert.equal(readJson(".codex-plugin/plugin.json").version, pkg.version);
   assert.equal(readJson(".claude-plugin/plugin.json").version, pkg.version);
   assert.equal(readJson("adapters/claude/.claude-plugin/plugin.json").version, pkg.version);
@@ -107,7 +111,7 @@ test("managed-goal capabilities stay internal while model configuration has its 
   assert.match(read("skills/model/SKILL.md"), /Do not estimate or display cost/);
 });
 
-test("packed archive contains the 1.0.1 orchestration and runs public entrypoint and CLI smoke", () => {
+test("packed archive contains the 1.1.0 orchestration and runs public entrypoint and CLI smoke", () => {
   const tempRoot = mkdtempSync(path.join(os.tmpdir(), "metis-release-"));
   try {
     const output = execFileSync("npm", ["pack", "--json", "--pack-destination", tempRoot], {
@@ -128,6 +132,12 @@ test("packed archive contains the 1.0.1 orchestration and runs public entrypoint
     const files = new Set(result.files.map((item) => item.path));
     for (const expected of [
       "CHANGELOG.md",
+      "LICENSE",
+      "SECURITY.md",
+      "adapters/claude/LICENSE",
+      "adapters/claude/SECURITY.md",
+      "adapters/opencode/LICENSE",
+      "adapters/opencode/SECURITY.md",
       "docs/REFERENCE.md",
       "scripts/chromium-browser-verifier.mjs",
       "skills/metis/capabilities/browser-testing/CAPABILITY.md",
@@ -135,6 +145,10 @@ test("packed archive contains the 1.0.1 orchestration and runs public entrypoint
       "skills/model/agents/openai.yaml",
       "src/core/browser.js",
       "src/core/ownership.js",
+      "src/core/owner.js",
+      "src/core/owner-authority.js",
+      "src/core/owner-relay.js",
+      "src/adapters/spawn-descriptors.js",
       "src/core/task-packets.js",
       "src/core/prompt-protocols.js",
       "src/core/interfaces.js",
@@ -147,6 +161,7 @@ test("packed archive contains the 1.0.1 orchestration and runs public entrypoint
     for (const excluded of [
       "docs/PERFORMANCE_OPTIMIZATION_PROMPT.md",
       "docs/VERIFICATION.md",
+      "docs/RELEASING.md",
       "release/README.md",
       "scripts/generate-reference.mjs",
       "scripts/validate.mjs"
@@ -163,6 +178,37 @@ test("packed archive contains the 1.0.1 orchestration and runs public entrypoint
       stdio: ["ignore", "pipe", "pipe"]
     });
     assert.match(help, /Metis CLI/);
+    assert.match(help, /metis owner next\|claim/);
+    assert.match(help, /metis relay read/);
+    assert.equal(JSON.parse(readFileSync(path.join(packedRoot, "package.json"), "utf8")).version, readJson("package.json").version);
+
+    const consumerRoot = path.join(tempRoot, "consumer");
+    mkdirSync(consumerRoot);
+    execFileSync("npm", ["install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false", "--prefix", consumerRoot, archive], {
+      cwd: tempRoot,
+      env: { ...process.env, npm_config_cache: path.join(tempRoot, "npm-cache"), npm_config_dry_run: "false" },
+      stdio: "pipe"
+    });
+    const installedCli = path.join(consumerRoot, "node_modules/.bin/metis");
+    const installedHelp = execFileSync(process.execPath, [installedCli, "--help"], { cwd: consumerRoot, encoding: "utf8", stdio: "pipe" });
+    assert.match(installedHelp, /metis owner next\|claim/);
+    assert.match(installedHelp, /metis relay read/);
+
+    const fixtureRoot = path.join(tempRoot, "fixture");
+    mkdirSync(fixtureRoot);
+    execFileSync("git", ["init", "-q"], { cwd: fixtureRoot, stdio: "pipe" });
+    const initialized = JSON.parse(execFileSync(process.execPath, ["--no-warnings", installedCli, "--root", fixtureRoot, "init", "--host", "all"], {
+      cwd: fixtureRoot,
+      encoding: "utf8",
+      stdio: "pipe"
+    }));
+    assert.equal(initialized.lifecycle.route, "no-run");
+    const installedConfig = JSON.parse(readFileSync(path.join(fixtureRoot, ".metis/config.json"), "utf8"));
+    assert.equal(installedConfig.version, CONFIG_VERSION);
+    for (const host of ["claude", "codex", "opencode"]) {
+      assert.equal(installedConfig.delegation.ownerExecution.hosts[host].childSpawning, false);
+    }
+    assert.equal(existsSync(path.join(fixtureRoot, ".metis/state/state.db")), false);
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }

@@ -9,51 +9,59 @@ metadata:
 
 `/goal` keeps the host goal active.
 `$metis` transfers the engineering lifecycle to Metis.
-
 Activate this skill only for the literal `$metis` marker.
 Continue until the runtime returns `COMPLETE` or a recorded user, authority, budget, or unrecoverable blocker.
 A plan, child result, review, or passing test is not completion.
 
 ## Product boundary
-
 Metis is an orchestration boundary.
 It controls lifecycle state, task graphs, Task Packets, ownership, integration, evidence, and completion gates.
 The host controls process, network, shell, and tool permissions.
-
 Read [operations.md](references/operations.md) for cleanup, recovery, and runtime commands.
 
-## Main is an orchestrator
-
-Main keeps goal-level state only.
-Main can:
+## Main is an orchestrator: coordinates the goal, documents, and task owners
+Main keeps only goal-level state and coordinates the Goal Contract, canonical
+artifacts, and task-owner handoffs. Main can:
 
 - interpret and freeze the Goal Contract;
-- read compact runtime state;
-- execute the next controller action;
+- read compact runtime state and follow the runtime-returned action/profile;
 - create the exact task specs returned by the runtime;
-- claim and spawn the current task wave;
-- submit terminal child results;
-- select a route from completed diagnosis;
-- present real user or authority blockers.
-
+- assign and monitor bounded task owners;
+- submit terminal results and present user or authority blockers.
 Main must not:
 
-- inspect the repository broadly;
-- perform external research;
-- write discovery, design, or plan artifacts;
-- write long worker prompts;
-- implement or repair code;
-- review its own result;
-- operate a browser for verification;
+- inspect the repository broadly or perform external research;
+- write discovery, design, or plan artifacts or long worker prompts;
+- implement, repair, or self-verify code;
+- review its own result or operate a browser;
 - treat child prose as durable state.
+
+### Task owners
+
+An existing `coordinator` task is the task owner for one bounded subtree. Main
+and the planner approve its direct-child subtree in the sealed plan; dynamic
+child-task creation changes that plan and must be requested from Main for
+approval and re-sealing. The owner preserves the subtree lifecycle through
+normal completion, coordinates low-cost execution agents and an independent
+verifier, and receives local progress and normal completion. The owner does not
+implement or self-verify. It escalates only contract, scope, interface,
+authority, or budget changes, or an unresolved blocker. A child task handles
+only its packet outcome and its terminal handoff goes to the parent owner; it
+must not repeat the full goal lifecycle. Only the root owner reports through
+Main's `next`/action boundary.
+
+Owner lifecycle actions are `metis owner next|claim|ack|heartbeat|abort|child-failure|status <owner-task-id> --lease <owner-lease>`; `ack`, `abort`, `status`, and `child-failure` also carry `--batch <id>` and the existing receipts/data flags. Apply the global budget `maxConcurrent` with per-owner `maxConcurrentChildren` (default 4; configurable to any positive integer; global cap applies).
+
+A verifier is a distinct host receipt/agent from the worker it verifies. Owner execution requires explicit `config delegation.ownerExecution.hosts.<host>` with `childSpawning: true` and verified `evidence`; unknown/false blocks it.
+Use `mode: "host-relay"` as the common Claude/Codex fallback: owner prepares and relays only a batch ID to top-level Main. Main authenticates `metis relay read <batch-id>`; it returns descriptors but does not spawn.
+Existing host tools create children and `schedule ack` records real receipts. Owner retains decisions and completion; credentials stay with Main. Native modes require separate evidence; an Agent tool or flag alone is insufficient.
+Capability is false by default; see `references/delegation.md` for config and complete relay CLI flags.
 
 ### Terminal child handoff (Codex host) The spawn descriptor carries a task-scoped result file and lease-fenced handoff command. The child must write only the packet-schema JSON to that exact file, then execute the command with `--file`; never interpolate result JSON into a shell command. This is the durable completion and is fenced by the lease. Never pass raw transcripts or worker output into Main. Main must first inspect durable task state and must not submit a duplicate finish for an already-terminal task. For hosts without an executable handoff descriptor, write the bounded packet-schema JSON to a task-scoped file and run `$METIS task finish <task-id> --lease <lease-token> --file <result-file> --pretty`.
 Run `$METIS next --pretty` in a bounded loop, executing returned Main actions, especially `$METIS plan ingest <planner-task-id> --pretty` for `INGEST_PLAN_DRAFT`, before `$METIS drive --max-iterations N` (drive cannot replace Main actions). Heartbeat while waiting; a terminal result always triggers the finish -> next -> required-action handoff.
-
 Fresh subagents perform discovery, research, synthesis, design, planning, task compilation, implementation, diagnosis, review, verification, and curation.
 
 ## Runtime launcher
-
 Run from the repository root.
 Resolve this skill directory from the loaded `SKILL.md` path.
 Set `METIS` to:
@@ -61,20 +69,20 @@ Set `METIS` to:
 ```sh
 node --no-warnings <skill-directory>/scripts/metis.mjs
 ```
-
 A project installation can replace this with its local launcher.
 
 ## Profiles, effort, and performance
 
 The runtime chooses `fast`, `balanced`, or `full` deterministically from the
-Goal Contract and risk evidence. Unsafe fast work is rejected. Use
-`$METIS drive --max-iterations N` only for bounded controller advancement; it
-does not bypass Main ownership, task, budget, review, or integration fences.
-For a trivial single-behavior goal, keep the Goal Contract structurally exact:
+Goal Contract and risk evidence. Unsafe fast work is rejected. Treat the
+runtime-returned profile and action as authoritative; do not invent a route or
+force an unnecessary critic. Use `$METIS drive --max-iterations N` only for
+bounded controller advancement; it does not bypass Main ownership, task,
+budget, review, or integration fences. For a trivial single-behavior goal, keep
+the Goal Contract structurally exact:
 put only repository-relative paths in `scope`, keep the single functional must
 as the sole requirement, and record path boundaries plus test commands in
 constraints and success criteria instead of inventing extra requirements.
-
 Task effort progresses from `low` through `medium`, `high`, `xhigh`, and `max`,
 then is negotiated against host/model capability evidence. The host adapter
 renders provider-specific spawn flags. Every claim creates append-only attempt
@@ -106,7 +114,6 @@ median/nearest-rank P95, and retain failure/pass-rate counts separately.
 10. Repeat from step 7.
 
 Do not scan unrelated repository content during attachment or routing.
-
 Controller credentials use:
 
 ```text
@@ -128,7 +135,6 @@ Do not bypass phase gates.
 Do not edit SQLite directly.
 Do not keep raw source, patches, logs, screenshots, or child transcripts in Main context.
 Store large material as typed evidence, artifacts, or runtime objects.
-
 Inspect state with:
 
 ```sh
@@ -137,7 +143,6 @@ $METIS journal replay --pretty
 ```
 
 ## Goal Contract
-
 Freeze one Goal Contract during intake.
 It must contain:
 
@@ -163,7 +168,6 @@ Read [contracts.md](references/contracts.md) for traceability.
 Read [approval.md](references/approval.md) for authority boundaries.
 
 ## Universal task graph
-
 Use runtime tasks for the complete lifecycle:
 
 ```text
@@ -188,12 +192,16 @@ It also has a role, phase, wave, dependencies, scope, interfaces, acceptance cri
 A wave is a parallel boundary.
 The scheduler dispatches only the earliest open wave.
 Do not start a later wave until every task in the earlier wave is terminal.
-
+Do not split work merely to increase parallelism. Follow the runtime's
+eligible gate: when the materialized plan has four dependency-independent,
+non-overlapping mutable implementation slices, the plan must use the required
+four-way earliest wave; below that gate, keep genuinely atomic or coupled work
+atomic. Preserve an explicit parallel requirement even when it is costly, and
+record the evidence and rationale.
 Read [lifecycle.md](references/lifecycle.md) for phase rules.
 Read [delegation.md](references/delegation.md) for scheduling rules.
 
 ## Discovery and research
-
 Main does not inspect or browse.
 
 For discovery:
@@ -210,7 +218,6 @@ For research:
 2. Separate official technical facts from established workflow patterns.
 3. Dispatch independent questions in parallel.
 4. Let a synthesizer produce the canonical research artifact.
-
 A synthesizer can use only supplied child evidence.
 It must not perform new inspection or research.
 
@@ -228,7 +235,6 @@ Do not search the web for a new skill on every task.
 Dispatch a designer subagent.
 The designer consumes current discovery and research artifacts.
 It must choose the simplest complete design and define shared interfaces before parallel implementation.
-
 UI work can require:
 
 ```text
@@ -236,7 +242,6 @@ experience-contract
 visual-contract
 browser-acceptance
 ```
-
 The visual contract must use existing repository conventions.
 The browser contract must define executable user flows and assertions.
 
@@ -244,7 +249,6 @@ Seal the design and dispatch an independent `design-critic` against the exact se
 Main must not rewrite the critic result.
 
 ## Planning and PlanDraft
-
 Dispatch a planner subagent after the design is approved.
 The planner returns a typed `PlanDraft`.
 It does not write child prompts.
@@ -269,7 +273,6 @@ run standalone `next` only to rediscover the action; execute only that action; n
 
 The runtime validates IDs, dependencies, cycles, interfaces, waves, and task boundaries.
 It then creates deterministic Task Packets and any required compiler tasks.
-
 Seal the graph only after all required Task Packets are ready.
 Dispatch an independent `plan-critic` against the sealed plan.
 
@@ -277,7 +280,6 @@ Dispatch an independent `plan-critic` against the sealed plan.
 
 Never send a one-line instruction such as “implement this and test it.”
 Every child receives one compiled Task Packet and no Main transcript.
-
 A packet includes:
 
 - role protocol;
@@ -293,7 +295,6 @@ A packet includes:
 - authority boundary;
 - stop conditions;
 - structured result schema.
-
 Inspect a packet with:
 
 ```sh
@@ -317,7 +318,6 @@ The compiler can improve:
 - verification detail;
 - additional stop conditions;
 - handoff notes.
-
 The compiler cannot change:
 
 - scope or mutable paths;
@@ -335,7 +335,6 @@ Do not ask the worker to guess.
 Parallel workers must not invent shared boundaries.
 Bind tasks only to frozen interface contracts.
 Require every completed child to attest each consumed and produced interface with its exact frozen content hash.
-
 Interfaces can define:
 
 - function or module signatures;
@@ -344,7 +343,6 @@ Interfaces can define:
 - database records;
 - UI state contracts;
 - files exchanged between tasks.
-
 A new frozen version makes linked packets stale.
 Rebind and recompile before dispatch.
 A worker can report an interface conflict but cannot silently change the contract.
@@ -362,7 +360,6 @@ role + selected capabilities + task blueprint -> Task Packet
 Use only local capabilities selected by the runtime.
 Do not load every available skill.
 Do not create a fixed specialist role for every framework.
-
 Current dependency facts belong in researcher evidence.
 Useful external workflow patterns must be curated into the local capability catalog outside the active task.
 
@@ -388,7 +385,13 @@ Use `fork_turns: "none"` for Codex children.
 Respect the host's actual child-slot capacity; Main may occupy one total thread.
 Do not pretend rejected or unavailable spawns ran: explicitly abort or recover
 each rejected or unavailable descriptor.
-
+The owner, not Main, coordinates the active bounded subtree after handoff.
+It may use low-cost agents for execution and a separate receipt-backed verifier
+only when the configured host execution mode explicitly permits child spawning.
+The owner reports local progress and normal completion to Main through the
+parent result boundary; Main receives only the compact state needed for goal
+coordination. Child terminal handoff goes to the parent owner, while only the
+root owner uses Main's `next`/action boundary.
 Acknowledge only after the host spawn tool returns a nonempty child/session/agent receipt for every descriptor, bound to its exact task and lease attempt:
 
 ```sh
@@ -409,7 +412,6 @@ This renews controller and task leases.
 Wait in bounded intervals until every child result is terminal.
 
 ## Worktrees and results
-
 Every mutable attempt uses a detached Git worktree.
 There is no shared workspace fallback.
 
@@ -423,7 +425,6 @@ It must report acceptance results, interface use, checks, artifacts, evidence, b
 A statement such as “done” is not a result.
 
 ## Diagnosis and repair
-
 Do not retry a failed or blocked task immediately.
 When requested, dispatch a fresh `diagnostician`.
 
@@ -438,7 +439,6 @@ reconcile integration
 reopen plan or design
 request external authority
 ```
-
 Main selects one route from the completed diagnosis.
 Main does not perform the repair.
 A repair becomes a new bounded task.
@@ -449,7 +449,6 @@ Review the integrated repository with fresh reviewer tasks.
 Use only the specialist capabilities selected by current requirements, paths, interfaces, and risks.
 Blocking findings become repair tasks.
 After repair, run fresh review against the new fingerprint.
-
 Verification can include:
 
 - structured deterministic checks;
@@ -459,14 +458,15 @@ Verification can include:
 - an immutable verification candidate;
 - `adversarial-reviewer` completion review.
 
-Main must not operate the browser or judge screenshots.
+A verifier must be a distinct host receipt/agent from the worker and must
+inspect the worker's result independently. Main must not operate the browser or
+judge screenshots.
 A browser verifier records assertions, viewport, screenshots, console errors, network failures, and code fingerprint as browser evidence.
 
 ## Curate and complete
 
 Dispatch a curator for human documentation changes.
 Run generated index and knowledge synchronization after current code is verified.
-
 Completion requires current runtime state:
 
 - requirements traced;
@@ -495,5 +495,4 @@ Return to the user only for:
 
 For `STALLED_REPLAN`, change the evidence search, design, task boundary, capability route, or model route.
 Do not repeat the same action.
-
 Read [recovery.md](references/recovery.md) and [token-policy.md](references/token-policy.md) when those gates activate.
