@@ -1,9 +1,9 @@
 # Operations
 
-Metis 1.1.0 local release-candidate preparation runs one managed repository
-objective through a subagent-first lifecycle. The latest public release remains
-1.0.1. Local preparation checks are recorded in `VERIFICATION.md`; publication
-is a separate step described in `RELEASING.md`. Main remains the controller.
+Metis 1.1.0, the current public release, runs one managed repository objective
+through a subagent-first lifecycle. Local verification checks are recorded in
+`VERIFICATION.md`; release packaging and future publication steps are described
+in `RELEASING.md`. Main remains the controller.
 Fresh subagents perform repository inspection, research, design, planning, implementation, review, verification, diagnosis, and curation.
 
 ## Install
@@ -11,7 +11,7 @@ Fresh subagents perform repository inspection, research, design, planning, imple
 From a packaged archive:
 
 ```sh
-npm install -g ./metis-orchestrator-1.0.1.tgz
+npm install -g ./metis-orchestrator-1.1.0.tgz
 ```
 
 Install one or all host adapters from the repository root:
@@ -26,8 +26,7 @@ metis doctor --pretty
 ```
 
 The plugin remains passive until the user writes the literal `$metis` marker.
-The install example above names the latest public 1.0.1 archive; 1.1.0 is only
-being prepared locally and must not be described as published.
+The install example names the latest public 1.1.0 archive.
 
 Before starting a goal, the host must expose the globally installed Metis
 plugin/command surface: `/metis` must resolve and `/goal $metis "<objective>"`

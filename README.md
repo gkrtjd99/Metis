@@ -5,8 +5,7 @@
 Metis is a subagent-first engineering orchestrator for long repository goals.
 It provides Codex, Claude Code, and OpenCode adapter previews for structured
 discovery, research, design, planning, implementation, review, and
-verification. **1.1.0 is a local release candidate/preparation state, not a
-public release. The current public release is 1.0.1.**
+verification. **1.1.0 is the current public release.**
 
 Start one managed goal:
 
@@ -29,7 +28,7 @@ Requirements:
 The release package supports macOS (darwin) and Linux only. Windows is not a
 supported installation target.
 
-Host status for the 1.1.0 release candidate/preparation:
+Host status for the 1.1.0 public release:
 
 | Host | Status | Release evidence |
 | --- | --- | --- |
@@ -41,22 +40,22 @@ Do not treat a green package test as native-host E2E evidence. Promote a host
 to supported only after the complete goal-to-verification flow passes in an
 authenticated release environment.
 
-The 1.1.0 candidate adds owner/coordinator control,
+The 1.1.0 release adds owner/coordinator control,
 strong-tier coordinator routing with direct-child low-cost work, explicit scope
 and lease fences, actual independent receipts relayed by the host through a
 common ABI, bounded Main context, and a security-metadata false-positive fix.
 `ownerExecution` remains off by default and requires explicit capability
 evidence; nested Agent execution is not claimed as automatic support. These
-are validation and containment controls, not a performance claim, and the
-final validation must be repeated against the release commit. See the
-[release preparation guide](docs/RELEASING.md) for packaging and publication boundaries.
+are validation and containment controls, not a performance claim. See the
+[release guide](docs/RELEASING.md) for the current release record and future
+packaging and publication procedure.
 
-Download the latest public `metis-orchestrator-1.0.1.tgz` from the
-[v1.0.1 release](https://github.com/gkrtjd99/Metis/releases/tag/v1.0.1), then
+Download the latest public `metis-orchestrator-1.1.0.tgz` from the
+[v1.1.0 release](https://github.com/gkrtjd99/Metis/releases/tag/v1.1.0), then
 install it:
 
 ```sh
-npm install -g ./metis-orchestrator-1.0.1.tgz
+npm install -g ./metis-orchestrator-1.1.0.tgz
 ```
 
 Or install directly from the GitHub source:

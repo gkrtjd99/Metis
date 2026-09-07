@@ -1,9 +1,9 @@
 # Architecture
 
-Metis 1.1.0 local release-candidate preparation retains schema version 11,
+Metis 1.1.0, the current public release, retains schema version 11,
 configuration version 6, and runtime layout version 4. No migration is required.
-The latest public release remains 1.0.1. Local preparation results and the
-native execution-stage evidence boundary are recorded in `VERIFICATION.md`.
+The native execution-stage evidence boundary and local verification results are
+recorded in `VERIFICATION.md`.
 
 ## System purpose
 
@@ -219,7 +219,7 @@ The runtime invalidates downstream state.
 
 ## Universal task graph
 
-Metis 1.1.0 preparation retains tasks for the complete lifecycle.
+Metis 1.1.0 retains tasks for the complete lifecycle.
 Implementation is not a special scheduling system.
 
 Task kinds:
@@ -669,6 +669,6 @@ Runtime layout:
 
 ## Version boundary
 
-The 1.1.0 preparation retains rejection of incompatible schema and
-configuration versions. New projects create runtime state with the canonical
-versions above; no schema, configuration, or layout migration is needed.
+The 1.1.0 release retains rejection of incompatible schema and configuration
+versions. New projects create runtime state with the canonical versions above;
+no schema, configuration, or layout migration is needed.

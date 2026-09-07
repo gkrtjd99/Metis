@@ -1,11 +1,10 @@
 # Verification
 
-Metis 1.1.0 release preparation verifies the runtime control plane and the
-subagent-first workflow contract. The local 1.1.0 package check passed with
-466 tests passing, zero failures, and one Chromium-unavailable skip out of 467.
-This includes offline tarball installation and installed CLI initialization.
-1.1.0 remains unpublished; repeat the suite against the final release commit
-before publication.
+Metis 1.1.0 verifies the runtime control plane and the subagent-first workflow
+contract. The local 1.1.0 package check passed with 466 tests passing, zero
+failures, and one Chromium-unavailable skip out of 467. This includes offline
+tarball installation and installed CLI initialization. These local results are
+recorded separately from any final-tag rerun.
 
 ## Release command
 
@@ -28,8 +27,9 @@ The bounded native execution-stage evidence currently recorded for Claude Code
 and Codex is: owner → worker → independent verifier → same-owner resume →
 complete, with actual host receipts, an immutable test hash, and audited
 SQLite state. These actual CLI checks passed on commit `162dbff` before the
-version-only release preparation; the runtime implementation has not changed
-in this preparation. The fixture's `forcePhase` supplies plan-stage setup, so
+1.1.0 release metadata updates; the runtime implementation has not changed in
+these documentation and release-metadata changes. The fixture's `forcePhase`
+supplies plan-stage setup, so
 the passed flow covers execution rather than autonomous plan generation.
 Multi-owner real parallelism, real-host failure recovery, and performance
 improvement were not measured by this smoke test. The local 1.1.0 package result
@@ -41,7 +41,7 @@ Generate the reference after changing metadata, defaults, layout, or CLI help:
 npm run docs:generate
 ```
 
-## 1.1.0 candidate orchestration coverage
+## 1.1.0 orchestration coverage
 
 The performance release coverage additionally verifies:
 
@@ -276,9 +276,9 @@ repository scan, preserve differing files under `force=false`, and report the
 `no-run`, live-controller, expired-controller, paused, and completed routes
 without automatic takeover.
 
-The packed archive for the eventual 1.1.0 release must include the current Task
-Packet, interface, plan-ingestion, and role runtime surfaces. Development tests
-remain in Git for CI and are excluded from the installable package.
+The 1.1.0 packed archive includes the current Task Packet, interface,
+plan-ingestion, and role runtime surfaces. Development tests remain in Git for
+CI and are excluded from the installable package.
 
 ## Native host boundary
 
@@ -287,9 +287,9 @@ The normal release suite validates host adapters, installed role files, task con
 Actual native Codex, Claude Code, and OpenCode end-to-end tests require those CLIs to be installed and authenticated in the release environment.
 If they are unavailable, the release metadata must state that limitation.
 A green package suite must not be described as a native-host agent-spawn test.
-For the 1.1.0 preparation, Claude Code and Codex have only the bounded
-execution-stage evidence described above; they are not thereby promoted to a
-final supported release. OpenCode remains an adapter preview. Full native
+For the 1.1.0 public release, Claude Code and Codex have the bounded
+execution-stage evidence described above; this does not establish full native
+release-environment E2E. OpenCode remains an adapter preview. Full native
 release-environment evidence is still pending.
 
 ## Release evidence
@@ -305,7 +305,7 @@ A release record should contain:
 - browser smoke availability and result;
 - schema, configuration, and runtime layout versions.
 
-The prepared 1.1.0 versions are:
+The 1.1.0 release versions are:
 
 ```text
 package: 1.1.0

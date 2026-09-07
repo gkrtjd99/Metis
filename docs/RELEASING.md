@@ -1,10 +1,11 @@
-# Metis 릴리즈 준비와 공개 배포
+# Metis 릴리즈와 공개 배포
 
-## 준비 상태와 승인 범위
+## 현재 1.1.0 릴리즈와 승인 범위
 
-1.1.0은 아직 공개되지 않은 준비 버전이며, 현재 public release는 1.0.1이다.
-로컬 검증과 패키지 생성은 commit, push, PR 병합, 태그 생성, GitHub release 또는
-npm registry 공개를 의미하지 않는다. 외부에 반영하는 단계는 별도 승인을 받는다.
+1.1.0은 현재 public release이며, 이 문서는 해당 릴리즈의 패키징·검증 기록과
+향후 공개 절차를 구분한다. 로컬 검증과 패키지 생성 자체는 commit, push, PR
+병합, 태그 생성, GitHub release 또는 npm registry 공개를 수행하지 않는다.
+이 저장소의 외부 반영은 release owner가 승인 경계에 따라 별도로 수행한다.
 
 Schema 11, configuration 6, runtime layout 4는 1.0.1과 동일하다.
 이번 변경으로 마이그레이션은 필요하지 않다. `ownerExecution`은 기본 비활성화이며,
@@ -16,10 +17,10 @@ verifier → 같은 owner 세션 복귀 및 완료를 확인했다. 계획 단�
 실패 복구·성능 개선은 이 결과로 입증되지 않는다. 패키지 검사를 native 모델
 실행 검사로 설명하지 않는다.
 
-## 로컬 후보 패키지 준비
+## 1.1.0 패키지 검증
 
 저장소 루트에서 실행한다. 매번 새 임시 디렉터리를 사용해 이전 증거를 덮어쓰지 않는다.
-미커밋 변경이 있는 후보라면 기준 HEAD뿐 아니라 변경 diff와 검사 결과도 보존한다.
+미커밋 변경이 있다면 기준 HEAD뿐 아니라 변경 diff와 검사 결과도 보존한다.
 
 ```sh
 release_dir=$(mktemp -d "${TMPDIR:-/tmp}/metis-1.1.0-release.XXXXXX") &&
@@ -59,9 +60,9 @@ node --no-warnings "$release_dir/consumer/node_modules/.bin/metis" \
 `--ignore-scripts`는 로컬 패키지 설치 과정의 lifecycle script를 실행하지 않는
 검사 조건이다. Metis에는 설치 script나 제3자 runtime dependency가 없다.
 
-`npm pack`은 `package.json`의 `files` 목록을 따른다. 후보 tarball이 로컬
-미커밋 소스에서 만들어졌다면 특정 commit의 산출물이라고 주장하지 않는다.
-이 후보와 그 checksum은 검증용이며 최종 공개 파일로 재사용하지 않는다.
+`npm pack`은 `package.json`의 `files` 목록을 따른다. 로컬 미커밋 소스에서
+만든 tarball은 특정 commit의 공개 산출물이라고 주장하지 않는다. 이 파일과
+checksum은 해당 검증에만 사용하고 공개 파일로 재사용하지 않는다.
 
 ## 보존할 증거
 
@@ -72,16 +73,20 @@ node --no-warnings "$release_dir/consumer/node_modules/.bin/metis" \
 - package/schema/configuration/layout 버전
 - native host 검사에 사용한 코드 기준과 실제 검증 범위
 
-검사 결과는 해당 후보의 실제 로그를 기준으로 기록한다. 이전 1.0.1 코드의
-통과 결과를 새 1.1.0 후보 검사 결과로 재사용하지 않는다. Chromium이 없는 경우
+검사 결과는 해당 실행의 실제 로그를 기준으로 기록한다. 이전 1.0.1 코드의
+통과 결과를 1.1.0 검사 결과로 재사용하지 않는다. Chromium이 없는 경우
 브라우저 검사를 통과로 바꾸지 않고 skip 사유를 남긴다.
 
-## 승인 후 공개 절차
+## 향후 태그·공개 절차
+
+다음 단계는 release owner가 별도 승인 경계 안에서 수행하는 향후 절차다. 아래
+명령은 fail-fast 검증 예시이며, 이 문서는 최종 태그 검사를 이미 실행했다고
+주장하지 않는다.
 
 1. `CHANGELOG.md`의 `Unreleased`를 실제 공개 날짜로 바꾸고, README 양언어와
    관련 문서의 준비 상태·최신 공개 버전·다운로드 링크를 최종화한다.
 2. 변경을 commit하고 PR의 CI·보안 검사 통과 후 `main`에 병합한다.
-3. 깨끗한 최종 checkout에서 `npm run check`를 다시 실행하고, 승인된 release
+3. 깨끗한 최종 checkout에서 `npm run check`를 실행하고, 승인된 release
    commit에 `v1.1.0` 태그를 만든다. 로컬 HEAD와 태그 commit의 일치를 확인한다.
 4. 그 checkout에서 새 `npm pack` 파일을 만들고 설치 검사를 반복한다. 소스
    아카이브는 같은 태그를 사용한다.

@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.1.0 - Unreleased
+## 1.1.0 - 2026-09-07
 
-Release preparation; 1.1.0 has not been published.
+Current public release.
 
 - Added owner lifecycle commands for coordinators to claim, monitor, verify,
   and complete an approved direct-child subtree using task leases rather than

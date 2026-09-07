@@ -5,8 +5,7 @@
 Metis는 장기 repository 목표를 위한 subagent 우선 engineering
 오케스트레이터입니다. Codex, Claude Code, OpenCode용 adapter preview를 통해
 discovery, research, design, planning, implementation, review, verification을
-구조화합니다. **1.1.0은 로컬 release candidate/preparation 상태이며 public
-release가 아닙니다. 현재 public release는 1.0.1입니다.**
+구조화합니다. **1.1.0은 현재 public release입니다.**
 
 Managed goal 하나를 시작하면 됩니다.
 
@@ -29,7 +28,7 @@ Metis는 목표를 완료하거나 사용자 또는 외부 권한의 명시적�
 Release package는 macOS(darwin)와 Linux만 지원합니다. Windows는 지원 대상이
 아닙니다.
 
-1.1.0 release candidate/preparation host 상태:
+1.1.0 public release host 상태:
 
 | Host | 상태 | Release evidence |
 | --- | --- | --- |
@@ -41,20 +40,20 @@ Package test 통과를 native-host E2E 증거로 간주하지 않습니다. 인�
 환경에서 goal 시작부터 verification까지 전체 flow가 통과한 host만 supported로
 승격합니다.
 
-1.1.0 candidate preparation은 owner/coordinator 제어, strong-tier coordinator와
+1.1.0 release는 owner/coordinator 제어, strong-tier coordinator와
 직접 child low-cost 작업, 명시적인 scope와 lease fence, common ABI를 통한
 host-relay actual independent receipt, bounded Main context, security metadata
 false-positive 수정을 포함합니다. `ownerExecution` 기본값은 off이며 명시적인
 capability evidence가 있어야 켤 수 있습니다. 중첩 Agent 실행의 자동 지원은
 주장하지 않습니다. 이는 validation과 containment control이며 성능 향상 주장이
-아닙니다. 공개 직전에는 최종 release commit을 기준으로 다시 검증해야 합니다.
-패키징과 공개 배포의 구분은 [릴리즈 준비 절차](RELEASING.md)를 참조하세요.
+아닙니다. [릴리즈 가이드](RELEASING.md)에서 현재 릴리즈 기록과 향후
+패키징·공개 절차를 확인하세요.
 
-최신 public release인 [`v1.0.1` release](https://github.com/gkrtjd99/Metis/releases/tag/v1.0.1)에서
-`metis-orchestrator-1.0.1.tgz`를 내려받아 설치합니다.
+최신 public release인 [`v1.1.0` release](https://github.com/gkrtjd99/Metis/releases/tag/v1.1.0)에서
+`metis-orchestrator-1.1.0.tgz`를 내려받아 설치합니다.
 
 ```sh
-npm install -g ./metis-orchestrator-1.0.1.tgz
+npm install -g ./metis-orchestrator-1.1.0.tgz
 ```
 
 GitHub source에서 직접 설치할 수도 있습니다.
