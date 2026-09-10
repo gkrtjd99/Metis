@@ -1,3 +1,5 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { assertBudgetAvailable, budgetStatus, consumeBudget, estimateEffortUsage } from "./budget.js";
 import { compactTaskContract } from "./context.js";
 import { transaction } from "./db.js";
@@ -14,7 +16,8 @@ import {
   markTaskAttemptSpawnAccepted,
   startTaskAttempt,
   subjectArtifactKind,
-  taskContract
+  taskContract,
+  taskPlanExecutionSettingStatus
 } from "./tasks.js";
 import { escalateModelRoute } from "./model-routing.js";
 import { renderSpawnDescriptor } from "../adapters/spawn-descriptors.js";
@@ -22,6 +25,8 @@ import { cleanupTaskWorkspace, prepareTaskWorkspace } from "./worktrees.js";
 import { json, makeId, now, parseJson } from "./util.js";
 import { compileTaskPacket, taskPacketStatus } from "./task-packets.js";
 import { assertOwnerBatchSession, assertOwnerSession, assertOwnerSpawnReceipts, ownerHostCapability } from "./owner-authority.js";
+import { hostConcurrencyLimit } from "./host-capacity.js";
+import { plannerParallelismDeclaration } from "./plan-review.js";
 
 const ROLE_WEIGHT = Object.freeze({
   "design-critic": 100,
@@ -51,6 +56,50 @@ const ROLE_WEIGHT = Object.freeze({
 // still bounded by orchestration.maxConcurrent (normally four or eight), but
 // preparation itself is one serialized lane.
 export const SCHEDULER_PREPARATION_CONCURRENCY = 1;
+const RUNTIME_CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
+
+function runtimeInvocation(projectRoot, runId, args) {
+  const cwd = path.resolve(String(projectRoot));
+  return Object.freeze({ executable: process.execPath, args: ["--no-warnings", RUNTIME_CLI_PATH, "--root", cwd, "--run", String(runId), ...args], cwd });
+}
+
+function hostSpawnProtocol(projectRoot, runId, batchId, batch, owner, config) {
+  const taskIds = batch.map((item) => item.taskId);
+  const ackArgs = ["schedule", "ack", batchId, "--tasks", taskIds.join(","), "--owner", owner, "--receipts", "<JSON_RECEIPTS>", "--pretty"];
+  return {
+    protocol: "metis.host-spawn.v1",
+    batchId,
+    sequence: ["prepared", "spawn-all", "ack-once", "wait-host-completion"],
+    spawn: { descriptors: "batch[*].spawn", requireAll: true, forkTurns: "none" },
+    ack: {
+      mode: "single-batch",
+      requireReceiptPerTask: true,
+      allowPartialForRecovery: true,
+      // <JSON_RECEIPTS>는 host adapter가 하나의 argv 슬롯으로 치환한다.
+      invocation: runtimeInvocation(projectRoot, runId, ackArgs),
+      receiptKeys: taskIds
+    },
+    completion: {
+      protocol: "metis.host-completion.v1",
+      taskIds,
+      hostNotification: {
+        source: "host-native-process-or-session-notification",
+        providedBy: "host",
+        runtimeEmits: false,
+        optional: true
+      },
+      afterHostNotification: "check durable task state; if nonterminal, ingest terminal handoff and invoke task finish; only then call next",
+      durableRuntimeEvent: { type: "task.finished", taskIds },
+      fallback: {
+        mode: "bounded-wait",
+        waitSeconds: Math.max(1, Number(config.controller.heartbeatSeconds)),
+        heartbeatRequired: true,
+        doNotRepeatScheduleWakeupOrListAgents: true
+      }
+    },
+    security: { controllerCredentialsToChildren: false, shellEvaluation: false }
+  };
+}
 
 function criticalPathLengths(tasks) {
   const memo = new Map();
@@ -105,6 +154,14 @@ function subjectReady(db, projectRoot, runId, task) {
   return !kind || Boolean(latestArtifact(db, projectRoot, runId, kind, ["verified"]));
 }
 
+function desiredExecutionWidth(db, projectRoot, run) {
+  if (run.phase !== "execute") return null;
+  const state = plannerParallelismDeclaration(db, projectRoot, run.id);
+  if (state.error || state.declaration?.eligible !== true) return null;
+  const width = Number(state.declaration.desiredWidth ?? state.declaration.DesiredWidth);
+  return Number.isSafeInteger(width) && width > 0 ? width : null;
+}
+
 function graphRunnable(task, allTasks, db, runPhase) {
   if (task.status !== "pending" || task.phase !== runPhase) return false;
   if (task.parent_task_id) {
@@ -130,6 +187,7 @@ function graphRunnable(task, allTasks, db, runPhase) {
 
 export function proposeSchedule(db, projectRoot, runId, config, options = {}) {
   const run = getRun(db, runId);
+  const hostConcurrency = hostConcurrencyLimit(projectRoot, run.host, config.orchestration.maxConcurrent);
   const allTasks = listTasks(db, run.id);
   const parentTaskId = options.parentTaskId ?? null;
   const ownerSession = options.ownerLease
@@ -160,15 +218,17 @@ export function proposeSchedule(db, projectRoot, runId, config, options = {}) {
   });
   const packetReady = candidates.length;
   const running = allTasks.filter((task) => task.status === "running").length;
-  const slots = Math.max(0, Number(config.orchestration.maxConcurrent) - running);
+  const slots = Math.max(0, hostConcurrency - running);
+  const desiredWidth = desiredExecutionWidth(db, projectRoot, run);
+  const desiredWidthSlots = desiredWidth === null ? Number.POSITIVE_INFINITY : Math.max(0, desiredWidth - running);
   const budget = budgetStatus(db, run.id);
   const spawnRemaining = budget.remaining.agentSpawns ?? slots;
-  const requestedLimit = Number(options.limit ?? config.orchestration.maxConcurrent);
+  const requestedLimit = Number(options.limit ?? hostConcurrency);
   const ownerSlots = ownerSession
     ? Math.max(0, Number(config.delegation.ownerExecution.maxConcurrentChildren)
       - allTasks.filter((task) => task.parent_task_id === parentTaskId && task.status === "running").length)
     : slots;
-  const limit = Math.max(0, Math.min(requestedLimit, slots, ownerSlots, spawnRemaining));
+  const limit = Math.max(0, Math.min(requestedLimit, slots, desiredWidthSlots, ownerSlots, spawnRemaining));
   const criticalPath = criticalPathLengths(allTasks);
   const ordered = candidates
     .map((task) => ({ task, score: taskScore(task, criticalPath) }))
@@ -177,11 +237,11 @@ export function proposeSchedule(db, projectRoot, runId, config, options = {}) {
   const selected = [];
   const deferredCandidates = [];
   if (ordered.some(({ task }) => task.role === "coordinator") && ownerHostCapability(config, run.host).supported) {
-    invariant(Number(config.orchestration.maxConcurrent) >= 2, "OWNER_CONCURRENCY", "Owner와 하위 agent를 실행하려면 공통 슬롯이 최소 2개 필요합니다.");
+    invariant(hostConcurrency >= 2, "OWNER_CONCURRENCY", "Owner와 하위 agent를 실행하려면 공통 슬롯이 최소 2개 필요합니다.");
   }
   for (const candidate of ordered) {
     if (candidate.task.role === "coordinator" && ownerHostCapability(config, run.host).supported
-        && running + selected.length >= Number(config.orchestration.maxConcurrent) - 1) {
+        && running + selected.length >= hostConcurrency - 1) {
       deferredCandidates.push({ ...candidate, deferredReason: "owner 하위 작업을 위한 공통 실행 슬롯 예약" });
       continue;
     }
@@ -212,6 +272,28 @@ export function proposeSchedule(db, projectRoot, runId, config, options = {}) {
     reasoningEffort: task.reasoning_effort,
     readOnly: task.readOnly,
     targetPaths: task.targetPaths,
+    scope: task.scope,
+    nonGoals: task.nonGoals,
+    constraints: task.constraints,
+    dependsOn: task.dependsOn,
+    requirementIds: task.requirementIds,
+    acceptanceCriteria: task.acceptanceCriteria,
+    requiredEvidence: task.requiredEvidence,
+    expectedOutputs: task.expectedOutputs,
+    verificationModes: task.verificationModes,
+    risk: task.risk,
+    effort: task.effort,
+    sliceType: task.sliceType,
+    stopConditions: task.stopConditions,
+    interfaces: { inputs: task.interfaceInputs, outputs: task.interfaceOutputs },
+    slice: {
+      name: task.title,
+      outcome: task.goal,
+      targetPaths: task.targetPaths,
+      acceptanceCriteria: task.acceptanceCriteria,
+      verificationModes: task.verificationModes,
+      requiredEvidence: task.requiredEvidence
+    },
     score,
     reason: `wave=${task.wave}, priority=${task.priority}, criticalPath=${criticalPath.get(task.id) ?? 1}, role=${task.role}`
   }));
@@ -377,11 +459,14 @@ export function handleChildTerminal(db, projectRoot, runId, batchId, taskId, out
         budgetAvailable = false;
       }
     }
-    const canRequeue = retryable && budgetAvailable;
+    const approval = ["execute", "review", "verify", "curate"].includes(task.phase)
+      ? taskPlanExecutionSettingStatus(db, projectRoot, runId, task)
+      : { required: false, pass: true };
+    const canRequeue = retryable && budgetAvailable && approval.pass;
     const nextStatus = canRequeue
       ? "pending"
-      : (config.delegation?.diagnoseBeforeRetry === true ? "blocked" : "failed");
-    const route = canRequeue ? escalateModelRoute(config, task, "transient", { host: run.host }) : null;
+      : (!approval.pass || config.delegation?.diagnoseBeforeRetry === true ? "blocked" : "failed");
+    const route = canRequeue && !approval.required ? escalateModelRoute(config, task, "transient", { host: run.host }) : null;
     const timestamp = now();
     const changed = db.prepare(`
       UPDATE tasks SET status = ?, owner = NULL, failure_class = ?, escalation_cause = ?,
@@ -412,13 +497,17 @@ export function handleChildTerminal(db, projectRoot, runId, batchId, taskId, out
     recordEvent(db, runId, "scheduler.child-terminal", canRequeue ? "warning" : "error", {
       batchId, taskId, attemptFence: Number(item.attemptFence), hostReceipt: receipt.host_receipt,
       classification: classified.classification, code: classified.code, reason,
-      action: canRequeue ? "requeued" : "failed-closed", nextStatus, retryable, budgetAvailable
+      action: canRequeue ? "requeued" : "failed-closed", nextStatus, retryable, budgetAvailable,
+      executionSettingsCurrent: approval.pass,
+      executionSettingsReason: approval.pass ? null : approval.reason
     });
     return {
       batchId, taskId, attemptFence: Number(item.attemptFence), hostReceipt: receipt.host_receipt,
       classification: classified.classification, code: classified.code, reason,
       action: canRequeue ? "requeued" : "failed-closed", status: nextStatus,
-      retryable, budgetAvailable
+      retryable, budgetAvailable,
+      executionSettingsCurrent: approval.pass,
+      executionSettingsReason: approval.pass ? null : approval.reason
     };
   });
   cleanupTaskWorkspace(db, projectRoot, taskId, result.action === "requeued" ? "host-transient-retry" : "host-terminal-failure", result.attemptFence);
@@ -473,7 +562,55 @@ function stalePreparationError(batchId, reason, details = {}) {
   return new MetisError("SCHEDULER_PREPARATION_STALE", `Scheduler batch ${batchId} lost its claimed preparation fence: ${reason}.`, details);
 }
 
-function preparedContract(db, config, host, batchId, item, task) {
+function approvedExecutionPreflight(db, projectRoot, runId, batch, requireExactEffort = false) {
+  let required = requireExactEffort === true;
+  for (const item of batch) {
+    const task = getTask(db, item.taskId);
+    if (!["execute", "review", "verify", "curate"].includes(task.phase)) continue;
+    const approval = taskPlanExecutionSettingStatus(db, projectRoot, runId, task);
+    invariant(approval.pass, "PLAN_EXECUTION_SETTINGS_REAPPROVAL",
+      "실행 설정이 승인된 계획과 일치하지 않습니다. 계획 단계에서 다시 승인해야 합니다.", { taskId: task.id, reason: approval.reason });
+    required ||= approval.required;
+  }
+  return required;
+}
+
+function exactEffortPreflight(db, host, batch, requireExactEffort) {
+  if (requireExactEffort !== true) return;
+  const unavailable = [];
+  const deliverySupported = new Set(["claude", "codex"]).has(String(host ?? "").trim().toLowerCase());
+  for (const item of batch) {
+    const task = db.prepare(`
+      SELECT id, selected_model, requested_effort, effective_effort, reasoning_effort,
+             effort_source, supported_efforts_json, capability_status
+      FROM tasks WHERE id = ?
+    `).get(item.taskId);
+    if (!task) continue;
+    const supportedEfforts = parseJson(task.supported_efforts_json, []);
+    const requested = task.requested_effort ?? task.reasoning_effort ?? null;
+    const effective = task.effective_effort ?? task.reasoning_effort ?? null;
+    const status = String(task.capability_status ?? "unknown").trim().toLowerCase();
+    const exactSupported = deliverySupported
+      && Boolean(task.selected_model)
+      && (status === "known" || status === "safe-default")
+      && Array.isArray(supportedEfforts)
+      && supportedEfforts.some((value) => String(value).trim().toLowerCase() === String(requested ?? "").trim().toLowerCase())
+      && String(effective ?? "").trim().toLowerCase() === String(requested ?? "").trim().toLowerCase();
+    if (!exactSupported) unavailable.push({
+      taskId: task.id,
+      model: task.selected_model ?? null,
+      requestedEffort: requested,
+      effectiveEffort: effective,
+      capabilityStatus: status,
+      effortSource: task.effort_source ?? null,
+      supportedEfforts
+    });
+  }
+  invariant(unavailable.length === 0, "EFFORT_APPLICATION_UNAVAILABLE",
+    "Exact effort was requested but one or more selected tasks lack verified host/model support.", { host, unavailable });
+}
+
+function preparedContract(db, config, host, batchId, item, task, options = {}) {
   const rawContract = taskContract(db, item.taskId);
   const contract = compactTaskContract(rawContract, config.budgets.taskPacketTokens, {
     db, config, model: task.selected_model
@@ -496,21 +633,35 @@ function preparedContract(db, config, host, batchId, item, task) {
       overBudget: Boolean(contract.overBudget)
     });
   }
-  return {
-    ...item,
-    batchId,
-    workspacePath: rawContract.RepositoryRoot,
-    workspaceMode: rawContract.WorkspaceMode,
-    contract,
-    spawn: renderSpawnDescriptor(host, task, contract, {
+  const spawn = renderSpawnDescriptor(host, task, contract, {
       ownerCapability: task.role === "coordinator" ? ownerHostCapability(config, host) : null,
       batchId,
       attemptFence: item.attemptFence,
       leaseToken: item.leaseToken,
       workspacePath: rawContract.RepositoryRoot,
       workspaceMode: rawContract.WorkspaceMode,
-      parentRoot: rawContract.IntegrationRoot ?? task.run_project_root ?? rawContract.RepositoryRoot
-    })
+      parentRoot: rawContract.IntegrationRoot ?? task.run_project_root ?? rawContract.RepositoryRoot,
+      requireExactEffort: options.requireExactEffort === true,
+      requestedEffort: task.requested_effort ?? task.reasoning_effort,
+      effectiveEffort: task.effective_effort ?? task.reasoning_effort,
+      capabilityStatus: task.capability_status,
+      supportedEfforts: parseJson(task.supported_efforts_json, [])
+    });
+  if (options.requireExactEffort === true && spawn.effort_launch_ready !== true) {
+    throw new MetisError("EFFORT_APPLICATION_UNAVAILABLE", `Exact effort is not launchable for task ${task.id}.`, {
+      taskId: task.id,
+      effortStatus: spawn.effort_status ?? "unconfirmed",
+      requestedEffort: spawn.requested_effort ?? null,
+      effectiveEffort: spawn.effective_effort ?? null
+    });
+  }
+  return {
+    ...item,
+    batchId,
+    workspacePath: rawContract.RepositoryRoot,
+    workspaceMode: rawContract.WorkspaceMode,
+    contract,
+    spawn
   };
 }
 
@@ -546,6 +697,9 @@ export function claimSchedule(db, projectRoot, runId, config, options = {}) {
   invariant(owner, "SCHEDULER_OWNER", "Schedule claim needs an owner.");
   const proposal = proposeSchedule(db, projectRoot, runId, config, options);
   if (proposal.batch.length === 0) return { ...proposal, batchId: null };
+  // strict effort 실패는 attempt·lease·batch 생성보다 앞서야 한다.
+  let requireExactEffort = approvedExecutionPreflight(db, projectRoot, runId, proposal.batch, options.requireExactEffort);
+  exactEffortPreflight(db, getRun(db, runId).host, proposal.batch, requireExactEffort);
   const proposalBudget = budgetRequestForBatch(proposal.batch);
   assertBudgetAvailable(db, runId, proposalBudget);
   assertAttemptTokenBudget(db, runId, proposal.batch, config);
@@ -556,10 +710,16 @@ export function claimSchedule(db, projectRoot, runId, config, options = {}) {
     invariant(run.status === "active", "RUN_NOT_ACTIVE", `Run ${run.id} is ${run.status}.`);
     const currentTasks = listTasks(db, run.id);
     const running = currentTasks.filter((task) => task.status === "running").length;
-    const freeSlots = Math.max(0, Number(config.orchestration.maxConcurrent) - running);
+    const hostConcurrency = hostConcurrencyLimit(projectRoot, run.host, config.orchestration.maxConcurrent);
+    const freeSlots = Math.max(0, hostConcurrency - running);
     invariant(proposal.batch.length <= freeSlots, "CONCURRENCY_LIMIT", "The configured concurrency limit changed before this batch could be claimed.", {
-      requested: proposal.batch.length, running, freeSlots
+      requested: proposal.batch.length, running, freeSlots, hostConcurrency
     });
+    const desiredWidth = desiredExecutionWidth(db, projectRoot, run);
+    invariant(desiredWidth === null || running + proposal.batch.length <= desiredWidth,
+      "DESIRED_WIDTH_LIMIT", "계획의 실행 폭이 변경되어 현재 배치를 claim할 수 없습니다.", {
+        requested: proposal.batch.length, running, desiredWidth
+      });
     assertBudgetAvailable(db, run.id, proposalBudget);
     assertAttemptTokenBudget(db, run.id, proposal.batch, config);
     const controllerFence = Number(options.controllerFencingToken ?? run.controller_fencing_token);
@@ -569,7 +729,9 @@ export function claimSchedule(db, projectRoot, runId, config, options = {}) {
     if (ownerSession) {
       invariant(Number(ownerSession.owner.attempt_fence) === Number(options.ownerAttemptFence), "OWNER_FENCED", "Owner attempt가 변경되었습니다.");
       const runningChildren = currentTasks.filter((task) => task.parent_task_id === options.parentTaskId && task.status === "running").length;
-      invariant(runningChildren + proposal.batch.length <= Number(config.delegation.ownerExecution.maxConcurrentChildren), "OWNER_CONCURRENCY", "Owner 하위 동시 실행 한도를 초과했습니다.");
+      invariant(runningChildren + proposal.batch.length <= Number(config.delegation.ownerExecution.maxConcurrentChildren)
+        && running + proposal.batch.length <= hostConcurrency,
+      "OWNER_CONCURRENCY", "Owner 하위 동시 실행 한도를 초과했습니다.");
     }
     if (config.delegation?.scheduleByWave !== false) {
       const wave = earliestOpenWave(currentTasks, run.phase, ownerSession ? options.parentTaskId : null);
@@ -579,6 +741,9 @@ export function claimSchedule(db, projectRoot, runId, config, options = {}) {
     }
     const runnableIds = new Set(runnableTasks(db, run.id, config.orchestration.maxTasks).map((task) => task.id));
     for (const item of proposal.batch) invariant(runnableIds.has(item.taskId), "SCHEDULER_CLAIM_RACE", `Task ${item.taskId} is no longer runnable.`);
+    // proposal 이후 capability 변경도 claim transaction 안에서 차단해야 한다.
+    requireExactEffort = approvedExecutionPreflight(db, projectRoot, runId, proposal.batch, options.requireExactEffort);
+    exactEffortPreflight(db, run.host, proposal.batch, requireExactEffort);
     const provisional = [...activeLeases(db)];
     const claimed = [];
     for (const item of proposal.batch) {
@@ -642,7 +807,10 @@ export function claimSchedule(db, projectRoot, runId, config, options = {}) {
       heartbeatScheduleBatch(db, runId, batchId, config, { preparation: true });
       captureTaskBaseline(db, run, getTask(db, item.taskId), config, workspace);
       heartbeatScheduleBatch(db, runId, batchId, config, { preparation: true });
-      prepared.push(preparedContract(db, config, run.host, batchId, item, task));
+      const currentTask = getTask(db, item.taskId);
+      const taskExactEffort = approvedExecutionPreflight(db, projectRoot, runId, [item], requireExactEffort);
+      exactEffortPreflight(db, run.host, [item], taskExactEffort);
+      prepared.push(preparedContract(db, config, run.host, batchId, item, currentTask, { ...options, requireExactEffort: taskExactEffort }));
       heartbeatScheduleBatch(db, runId, batchId, config, { preparation: true });
     }
   } catch (error) {
@@ -681,6 +849,10 @@ export function claimSchedule(db, projectRoot, runId, config, options = {}) {
         "CONTROLLER_FENCED",
         `Scheduler batch ${batchId} lost its controller fence before preparation persistence.`
       );
+      const currentExactEffort = approvedExecutionPreflight(db, projectRoot, runId, selected, requireExactEffort);
+      exactEffortPreflight(db, run.host, selected, currentExactEffort);
+      invariant(!currentExactEffort || prepared.every((item) => item.spawn.effort_launch_ready === true),
+        "EFFORT_APPLICATION_UNAVAILABLE", "승인된 effort를 전달할 수 없는 배치는 준비 완료로 저장할 수 없습니다.");
       for (const item of selected) {
         const task = db.prepare("SELECT status, attempt_fence FROM tasks WHERE id = ? AND run_id = ?").get(item.taskId, runId);
         if (task?.status !== "running" || Number(task.attempt_fence) !== Number(item.attemptFence)) {
@@ -728,6 +900,8 @@ export function claimSchedule(db, projectRoot, runId, config, options = {}) {
     ...proposal,
     batchId,
     batch: prepared,
+    // preparation, 실제 spawn receipt, durable completion을 분리한다.
+    hostProtocol: hostSpawnProtocol(projectRoot, runId, batchId, prepared, owner, config),
     preparationConcurrency: SCHEDULER_PREPARATION_CONCURRENCY,
     preparation: {
       mode: "serialized",

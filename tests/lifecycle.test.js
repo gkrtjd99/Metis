@@ -277,6 +277,14 @@ test("a managed goal completes the full reviewed lifecycle", () => {
     }, config);
     finishReadOnly(db, root, run.id, "verify-greet", "verifier", {
       Summary: "The final module exists and exports greet.",
+      AcceptanceResults: [{
+        criterion: "Return current evidence",
+        status: "passed",
+        EvidenceRefs: [
+          "src/greet.js:1",
+          { type: "artifact", id: integrationCandidate.id, contentRef: integrationCandidate.content_ref }
+        ]
+      }],
       EvidenceRefs: [
         "src/greet.js:1",
         { type: "artifact", id: integrationCandidate.id, contentRef: integrationCandidate.content_ref }

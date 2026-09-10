@@ -1,7 +1,9 @@
 import { CHECKPOINT_KINDS } from "./metadata.js";
 import { invariant } from "./errors.js";
 import { repositoryCodeFingerprint } from "./repository.js";
-import { getRun, recordEvent, touchRun } from "./state.js";
+import { ensurePlannedExecutionCheckpoint, getRun, recordEvent, touchRun } from "./state.js";
+import { assertController } from "./ownership.js";
+import { transaction } from "./db.js";
 import { asArray, json, makeId, now, parseJson } from "./util.js";
 
 const CHECKPOINT_STATUSES = new Set(["pending", "resolved", "rejected", "waived"]);
@@ -91,6 +93,31 @@ function evidencePresent(db, runId, reference) {
 }
 
 export function resolveCheckpoint(db, runId, id, input = {}) {
+  invariant(!id.startsWith(`planned-execution-${runId}-`) || String(input.status ?? "resolved").trim() !== "resolved",
+    "PLANNED_EXECUTION_EXPLICIT_REQUEST", "계획 실행 승인은 명시적인 plan execute 명령을 사용해야 합니다.");
+  return resolveCheckpointInternal(db, runId, id, input);
+}
+
+// 이 API는 명시적 CLI 실행 승인 요청 전용입니다. 사용자 의도 자체를 증명하지는 않습니다.
+export function approvePlannedExecution(db, projectRoot, runId, input = {}) {
+  return transaction(db, () => {
+    assertController(db, runId, input.controller);
+    invariant(String(input.resolution ?? "").trim(), "CHECKPOINT_RESOLUTION", "명시적인 실행 승인 요청 사유가 필요합니다.");
+    const approval = ensurePlannedExecutionCheckpoint(db, projectRoot, runId);
+    invariant(approval.routeBinding?.pass !== false,
+      "PLAN_EXECUTION_SETTINGS_REAPPROVAL",
+      approval.reason ?? "실행 설정이 승인된 계획과 일치하지 않습니다.",
+      { routeBinding: approval.routeBinding ?? null });
+    invariant(approval.required && approval.basis && approval.checkpoint,
+      "PLANNED_EXECUTION_PLAN_REQUIRED", "현재 계약의 승인된 계획과 실행 승인 checkpoint가 필요합니다.");
+    if (approval.pass) return approval.checkpoint;
+    return resolveCheckpointInternal(db, runId, approval.checkpointId, {
+      status: "resolved", resolution: input.resolution, resolvedBy: input.resolvedBy ?? "user"
+    });
+  });
+}
+
+function resolveCheckpointInternal(db, runId, id, input = {}) {
   const checkpoint = getCheckpoint(db, id);
   invariant(checkpoint.run_id === runId, "CHECKPOINT_RUN_MISMATCH", "Checkpoint does not belong to this run.");
   invariant(checkpoint.status === "pending", "CHECKPOINT_TERMINAL", `Checkpoint ${id} is already ${checkpoint.status}.`);

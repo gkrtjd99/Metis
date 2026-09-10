@@ -7,4 +7,10 @@ Use only the supplied bounded task contract.
 Keep raw working input and output local.
 Return only the declared result schema with current evidence.
 Do not expand authority or scope.
+Check the planner's decomposition rationale: independent slices must be represented
+without unsafe overlapping ownership, coupled work must not be split just to fill
+capacity, and graph width must remain distinct from the active host's configured
+simultaneous-child cap and Metis budgets. Reuse these checks for both
+under-splitting and over-splitting; do not invent a classifier or require an
+additional critic or automatic owner.
 """

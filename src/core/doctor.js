@@ -6,6 +6,9 @@ import { capabilityRegistryManifest } from "./capabilities.js";
 import { objectSecurityStatus } from "./objects.js";
 import { runtimeDatabasePath, runtimeRoot } from "./paths.js";
 import { ROLES } from "./metadata.js";
+import { mergeCodexConfigLayers, parseCodexConfigText, projectCodexConfig } from "./host-capacity.js";
+
+export { mergeCodexConfigLayers, parseCodexConfigText } from "./host-capacity.js";
 
 function parseFeature(output, name) {
   const line = output.split(/\r?\n/).find((item) => item.trim().startsWith(name));
@@ -17,99 +20,12 @@ function parseFeature(output, name) {
   return null;
 }
 
-function parseSections(text) {
-  const sections = new Map([["", []]]);
-  let current = "";
-  for (const line of text.split(/\r?\n/)) {
-    const header = line.match(/^\s*\[([^\]]+)]\s*(?:#.*)?$/);
-    if (header) {
-      current = header[1].trim();
-      if (!sections.has(current)) sections.set(current, []);
-      continue;
-    }
-    sections.get(current).push(line);
-  }
-  return new Map([...sections].map(([name, lines]) => [name, lines.join("\n")]));
-}
-
-function setting(section, name) {
-  if (!section) return null;
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return section.match(new RegExp(`^\\s*${escaped}\\s*=\\s*([^#\\n]+)`, "m"))?.[1]?.trim() ?? null;
-}
-
-function booleanSetting(section, name) {
-  const value = setting(section, name)?.toLowerCase();
-  if (value === "true") return true;
-  if (value === "false") return false;
-  return null;
-}
-
-function stringSetting(section, name) {
-  const value = setting(section, name);
-  if (value === null) return null;
-  return value.replace(/^["']|["']$/g, "");
-}
-
-function integerSetting(section, name) {
-  const value = Number(setting(section, name));
-  return Number.isInteger(value) && value >= 0 ? value : null;
-}
-
-export function parseCodexConfigText(text, file = null) {
-  const sections = parseSections(text);
-  const root = sections.get("");
-  const features = sections.get("features");
-  const v2 = sections.get("features.multi_agent_v2");
-  return {
-    file,
-    exists: true,
-    provider: stringSetting(root, "model_provider"),
-    goals: booleanSetting(features, "goals"),
-    multiAgentV1: booleanSetting(features, "multi_agent"),
-    multiAgentV2: booleanSetting(v2, "enabled") ?? booleanSetting(features, "multi_agent_v2"),
-    maxConcurrentV2: integerSetting(v2, "max_concurrent_threads_per_session")
-      ?? integerSetting(root, "max_concurrent_threads_per_session"),
-    hideSpawnAgentMetadata: booleanSetting(v2, "hide_spawn_agent_metadata"),
-    toolNamespace: stringSetting(v2, "tool_namespace"),
-    exposeSpawnAgentModelOverrides: booleanSetting(v2, "expose_spawn_agent_model_overrides"),
-    waitAgentEnabled: booleanSetting(v2, "wait_agent_enabled")
-  };
-}
-
-export function mergeCodexConfigLayers(...layers) {
-  const fields = [
-    "provider",
-    "goals",
-    "multiAgentV1",
-    "multiAgentV2",
-    "maxConcurrentV2",
-    "hideSpawnAgentMetadata",
-    "toolNamespace",
-    "exposeSpawnAgentModelOverrides",
-    "waitAgentEnabled"
-  ];
-  const merged = { exists: false, files: [] };
-  for (const layer of layers.filter(Boolean)) {
-    if (!layer.exists) continue;
-    merged.exists = true;
-    if (layer.file) merged.files.push(layer.file);
-    for (const field of fields) {
-      if (layer[field] !== null && layer[field] !== undefined) merged[field] = layer[field];
-    }
-  }
-  merged.file = merged.files.at(-1) ?? null;
-  return merged;
-}
-
 function parseCodexConfig(projectRoot) {
-  const files = [
-    path.join(os.homedir(), ".codex", "config.toml"),
-    path.join(projectRoot, ".codex", "config.toml")
-  ];
-  return mergeCodexConfigLayers(...files.map((file) => existsSync(file)
-    ? parseCodexConfigText(readFileSync(file, "utf8"), file)
-    : { file, exists: false }));
+  const globalFile = path.join(os.homedir(), ".codex", "config.toml");
+  const global = existsSync(globalFile)
+    ? parseCodexConfigText(readFileSync(globalFile, "utf8"), globalFile)
+    : { file: globalFile, exists: false };
+  return mergeCodexConfigLayers(global, projectCodexConfig(projectRoot));
 }
 
 const METIS_ROLES = Object.freeze(ROLES.map((role) => `metis-${role}`));
@@ -213,14 +129,18 @@ export function doctor(projectRoot, config, db = null) {
   let dispatchMode = "sequential";
   if (multiAgentV2) dispatchMode = "codex-native-v2";
   else if (multiAgentV1) dispatchMode = "codex-native-v1";
-  const maxConcurrent = dispatchMode === "codex-native-v2"
-    ? Math.min(config.orchestration.maxConcurrent, codexConfig.maxConcurrentV2 ?? config.orchestration.maxConcurrent)
-    : dispatchMode === "codex-native-v1"
-      ? config.orchestration.maxConcurrent
-      : 1;
+  const invalidConcurrency = Boolean(codexConfig.invalid || codexConfig.maxConcurrentV2Invalid);
+  const maxConcurrent = invalidConcurrency
+    ? 0
+    : dispatchMode === "codex-native-v2"
+      ? Math.min(config.orchestration.maxConcurrent, codexConfig.maxConcurrentV2 ?? config.orchestration.maxConcurrent)
+      : dispatchMode === "codex-native-v1"
+        ? config.orchestration.maxConcurrent
+        : 1;
   const warnings = [];
+  if (invalidConcurrency) warnings.push(`Codex concurrency configuration is invalid and dispatch is fail-closed: ${codexConfig.reason ?? "use a positive safe integer"}.`);
   if (!codex) warnings.push("Codex CLI was not found. The runtime still works, but Codex-native Goal mode and dispatch are unavailable.");
-  if (codex && !goalMode) warnings.push("Codex native Goal mode is not enabled or was not detected. Enable the goals feature, then invoke `/goal $metis \"<objective>\"`.");
+  if (codex && !goalMode) warnings.push("Codex native Goal mode is not enabled or was not detected. Legacy `/goal $metis` requires goals; standalone continuation is a separate opt-in preview.");
   if (!codex && codexConfig.multiAgentV2) warnings.push("Codex multi-agent v2 is configured, but no Codex CLI is available on PATH.");
   if (dispatchMode === "codex-native-v2" && (codexConfig.provider ?? "openai") !== "openai") {
     warnings.push("Multi-agent v2 can depend on provider-specific transport. Test one child dispatch before a large run.");
@@ -295,6 +215,21 @@ export function doctor(projectRoot, config, db = null) {
     hosts: { codex, claude, opencode },
     adapters,
     capabilities,
+    continuation: {
+      protocol: "metis.continuation.v1",
+      status: "preview",
+      optInRequired: true,
+      fullGoalE2eVerified: false,
+      nativeGoalMustBeInactive: true,
+      nativeGoalActivityObservable: false,
+      controllerHeartbeatAutomatic: false,
+      hosts: {
+        codex: { nativeHooksDetected: codex ? parseFeature(features, "hooks") : false },
+        claude: { nativeHooksDetected: null },
+        opencode: { supported: false }
+      },
+      statement: "Native hook 존재 여부는 설치·세션 연결 또는 전체 목표 실행 검증을 의미하지 않습니다."
+    },
     boundary,
     isolation,
     objectStore,

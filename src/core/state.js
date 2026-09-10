@@ -7,13 +7,22 @@ import { validateMilestoneGraph, refreshMilestoneStatuses } from "./milestones.j
 import { initializeBudget, budgetStatus } from "./budget.js";
 import { appendJournal } from "./journal.js";
 import { MetisError, invariant } from "./errors.js";
-import { isSafeRepoPath, json, makeId, now, parseJson, redactValue, sha256, stableStringify } from "./util.js";
+import { asArray, isSafeRepoPath, json, makeId, now, parseJson, redactValue, sha256, stableStringify } from "./util.js";
 import { PHASES, REVIEW_ROLES as REVIEW_ROLE_NAMES } from "./metadata.js";
 import { assertController, controllerCredentials, newControllerLease, takeoverController } from "./ownership.js";
 import { validateMutableOwnershipPaths } from "./worktrees.js";
+import { evidenceRefIsCurrent, evidenceRefIsVerifiable } from "./provenance.js";
 import { compileTaskPacket, taskPacketStatus } from "./task-packets.js";
 import { bindTaskCapabilities, resolveTaskCapabilities, specialistRolesForCapabilities } from "./capabilities.js";
 import { selectModelRoute } from "./model-routing.js";
+import { addCheckpoint, getCheckpoint } from "./checkpoints.js";
+import {
+  applyPlanExecutionSettings,
+  normalizePlanExecutionSettings,
+  planExecutionSettings,
+  previousPlanExecutionSettings,
+  taskPlanExecutionSettingStatus
+} from "./tasks.js";
 
 export { PHASES };
 
@@ -127,9 +136,14 @@ export function fastPathEligibility(db, runId, options = {}) {
   const deploymentSegments = new Set(["deploy", "deployment", "deployments", "release", "releases", "production", "infrastructure"]);
   const deploymentScope = paths.some((item) => String(item).replaceAll("\\", "/").split("/").some((segment) => deploymentSegments.has(segment.toLowerCase())));
   const blockers = Number(db.prepare("SELECT COUNT(*) AS count FROM findings WHERE run_id = ? AND status = 'valid' AND kind = 'blocker'").get(run.id)?.count ?? 0);
-  const checkpoints = Number(db.prepare("SELECT COUNT(*) AS count FROM checkpoints WHERE run_id = ? AND blocking = 1 AND status = 'pending'").get(run.id)?.count ?? 0);
-  const activeWork = Number(db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE run_id = ? AND status NOT IN ('completed','waived')").get(run.id)?.count ?? 0)
-    + Number(db.prepare("SELECT COUNT(*) AS count FROM leases WHERE task_id IN (SELECT id FROM tasks WHERE run_id = ?)").get(run.id)?.count ?? 0);
+  const ignoredTaskIds = new Set((options.ignoreTaskIds ?? []).map((id) => String(id)));
+  const ignoredCheckpointIds = new Set((options.ignoreCheckpointIds ?? []).map((id) => String(id)));
+  const checkpoints = db.prepare("SELECT id FROM checkpoints WHERE run_id = ? AND blocking = 1 AND status = 'pending'").all(run.id)
+    .filter((item) => !ignoredCheckpointIds.has(String(item.id))).length;
+  const activeWork = db.prepare("SELECT id FROM tasks WHERE run_id = ? AND status NOT IN ('completed','waived')").all(run.id)
+    .filter((item) => !ignoredTaskIds.has(String(item.id))).length
+    + db.prepare("SELECT task_id FROM leases WHERE task_id IN (SELECT id FROM tasks WHERE run_id = ?)").all(run.id)
+      .filter((item) => !ignoredTaskIds.has(String(item.task_id))).length;
   const reasons = [];
   if (run.phase !== "discover") reasons.push("run is not at discover");
   if (route.lifecycleProfile !== "fast") reasons.push("lifecycle profile is not fast");
@@ -157,19 +171,150 @@ export function fastPathEligibility(db, runId, options = {}) {
   };
 }
 
-function fastPathRecordIds(runId) {
-  const prefix = `fast-path-${runId}`;
-  return {
-    artifactIds: [`${prefix}-discovery`, `${prefix}-research`, `${prefix}-design`, `${prefix}-plan`, `${prefix}-plan-review`],
-    milestoneId: `${prefix}-milestone`,
-    taskIds: [`${prefix}-implementation`, `${prefix}-integration-review`, `${prefix}-verification`, `${prefix}-adversarial-review`, `${prefix}-curation`]
-  };
+const FAST_PATH_PROFILE_VERSION = 2;
+const FAST_PATH_SOURCE = "bounded-fast-path";
+const FAST_PATH_V2_SOURCE = "bounded-fast-path-v2";
+
+function fastPathRecordIds(runId, profileVersion = FAST_PATH_PROFILE_VERSION) {
+  const prefix = profileVersion === 1 ? `fast-path-${runId}` : `fast-path-v2-${runId}`;
+  return profileVersion === 1
+    ? {
+      profileVersion,
+      artifactIds: [`${prefix}-discovery`, `${prefix}-research`, `${prefix}-design`, `${prefix}-plan`, `${prefix}-plan-review`],
+      milestoneId: `${prefix}-milestone`,
+      taskIds: [`${prefix}-implementation`, `${prefix}-integration-review`, `${prefix}-verification`, `${prefix}-adversarial-review`, `${prefix}-curation`]
+    }
+    : {
+      profileVersion,
+      artifactIds: [`${prefix}-discovery`, `${prefix}-research`, `${prefix}-design`, `${prefix}-plan`, `${prefix}-plan-review`],
+      milestoneId: `${prefix}-milestone`,
+      taskIds: [`${prefix}-implementation`, `${prefix}-verification`]
+    };
+}
+
+function fastPathProfileFromPlan(planArtifact) {
+  if (!planArtifact) return null;
+  const content = parsedArtifact(planArtifact);
+  const metadataVersion = Number(planArtifact.metadata?.fastPathProfileVersion);
+  const draftVersion = Number(content.planDraft?.fastPathProfileVersion);
+  const source = String(planArtifact.metadata?.source ?? content.source ?? "");
+  if (metadataVersion === FAST_PATH_PROFILE_VERSION
+      && (source === FAST_PATH_V2_SOURCE || source === FAST_PATH_SOURCE)) return FAST_PATH_PROFILE_VERSION;
+  if (draftVersion === FAST_PATH_PROFILE_VERSION && source === FAST_PATH_V2_SOURCE) return FAST_PATH_PROFILE_VERSION;
+  if (source === FAST_PATH_SOURCE) return 1;
+  return null;
+}
+
+function materializedFastPathProfile(db, projectRoot, runId) {
+  const plan = latestArtifact(db, projectRoot, runId, "plan", ["verified", "stale"]);
+  return fastPathProfileFromPlan(plan);
+}
+
+export function isFastPathV2(db, projectRoot, runId) {
+  try {
+    const run = getRun(db, runId);
+    if (run.route?.lifecycleProfile !== "fast") return false;
+    const ids = fastPathRecordIds(run.id, FAST_PATH_PROFILE_VERSION);
+    const plan = latestArtifact(db, projectRoot, run.id, "plan", ["verified"]);
+    const review = latestArtifact(db, projectRoot, run.id, "plan-review", ["verified"]);
+    const planData = parsedArtifact(plan);
+    const reviewData = parsedArtifact(review);
+    if (!plan || !review
+        || plan.id !== ids.artifactIds[3]
+        || review.id !== ids.artifactIds[4]
+        || plan.metadata?.source !== FAST_PATH_V2_SOURCE
+        || review.metadata?.source !== FAST_PATH_V2_SOURCE
+        || Number(plan.metadata?.fastPathProfileVersion) !== FAST_PATH_PROFILE_VERSION
+        || Number(review.metadata?.fastPathProfileVersion) !== FAST_PATH_PROFILE_VERSION
+        || plan.metadata?.immutable !== true
+        || planData.source !== FAST_PATH_V2_SOURCE
+        || Number(planData.fastPathProfileVersion) !== FAST_PATH_PROFILE_VERSION
+        || reviewData.source !== FAST_PATH_V2_SOURCE
+        || reviewData.fastPathProfileVersion !== FAST_PATH_PROFILE_VERSION
+        || reviewData.deterministic !== true
+        || reviewData.verdict !== "APPROVED"
+        || reviewData.reviewerTaskId !== null
+        || reviewData.planArtifactId !== plan.id
+        || reviewData.planContentRef !== plan.content_ref
+        || plan.metadata.planHash !== planData.planHash
+        || plan.metadata.planDraftHash !== sha256(stableStringify(planData.planDraft))) return false;
+    const { planHash: ignoredPlanHash, ...planWithoutHash } = planData;
+    if (sha256(stableStringify(planWithoutHash)) !== planData.planHash) return false;
+    const taskSpecs = Array.isArray(planData.tasks) ? planData.tasks : [];
+    const planTaskIds = taskSpecs.map((task) => task?.id).sort();
+    if (taskSpecs.length !== ids.taskIds.length
+        || stableStringify(planTaskIds) !== stableStringify([...ids.taskIds].sort())
+        || Number(db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE run_id = ?").get(run.id)?.count ?? 0) !== ids.taskIds.length) return false;
+    const worker = taskSpecs.find((task) => task.role === "worker");
+    const verifier = taskSpecs.find((task) => task.role === "verifier");
+    if (!worker || !verifier
+        || worker.runPhase !== "execute" || worker.readOnly !== false
+        || verifier.runPhase !== "review" || verifier.readOnly !== true
+        || stableStringify(worker.dependsOn ?? []) !== stableStringify([])
+        || stableStringify(verifier.dependsOn ?? []) !== stableStringify([worker.id])) return false;
+    const taskRows = db.prepare("SELECT id, role, phase, read_only FROM tasks WHERE run_id = ? ORDER BY id").all(run.id);
+    if (taskRows.length !== ids.taskIds.length
+        || taskRows.some((task) => !ids.taskIds.includes(task.id)
+          || (task.id === worker.id && (task.role !== "worker" || task.phase !== "execute" || Number(task.read_only) !== 0))
+          || (task.id === verifier.id && (task.role !== "verifier" || task.phase !== "review" || Number(task.read_only) !== 1)))) return false;
+    const packetBindings = normalizedPacketBindings(reviewData.packetBindings);
+    const metadataBindings = normalizedPacketBindings(review.metadata?.packetBindings);
+    const packetTaskIds = packetBindings?.map((binding) => binding.taskId).sort() ?? [];
+    const expectedTaskIds = [...ids.taskIds].sort();
+    if (!packetBindings
+        || packetBindings.length !== expectedTaskIds.length
+        || new Set(packetTaskIds).size !== packetTaskIds.length
+        || stableStringify(packetTaskIds) !== stableStringify(expectedTaskIds)
+        || stableStringify(packetBindings) !== stableStringify(metadataBindings)
+        || reviewData.packetSetHash !== sha256(stableStringify(packetBindings))
+        || review.metadata?.packetSetHash !== reviewData.packetSetHash) return false;
+    // verifier의 동적 artifact context는 dispatch 때 해석하므로 여기서는 sealed packet identity만 인증한다.
+    for (const binding of packetBindings) {
+      const task = db.prepare("SELECT id, role, compiled_packet_id FROM tasks WHERE id = ? AND run_id = ?")
+        .get(binding.taskId, run.id);
+      let packet = db.prepare("SELECT id, task_id, version, status, packet_hash, blueprint_hash, packet_ref FROM task_packets WHERE id = ?")
+        .get(binding.packetId);
+      if (!task || !packet
+          || binding.packetBlueprintHash !== binding.blueprintHash
+          || binding.compiledBlueprintHash !== binding.blueprintHash
+          || packet.task_id !== binding.taskId
+          || packet.version !== binding.version
+          || packet.packet_ref !== binding.packetRef
+          || packet.packet_hash !== binding.packetHash
+          || packet.blueprint_hash !== binding.compiledBlueprintHash) return false;
+      packet = db.prepare("SELECT status FROM task_packets WHERE id = ?").get(binding.packetId);
+      const currentPacket = db.prepare(`
+        SELECT id, status FROM task_packets
+        WHERE task_id = ? ORDER BY version DESC LIMIT 1
+      `).get(binding.taskId);
+      if (task.compiled_packet_id === binding.packetId) {
+        if (currentPacket?.id !== binding.packetId || currentPacket.status !== "ready" || packet?.status !== "ready") return false;
+        continue;
+      }
+      // 통합 후보 생성에 따른 verifier packet 재컴파일만 허용한다. 조회 중 packet 상태는 변경하지 않는다.
+      const integrationCandidate = latestArtifact(db, projectRoot, run.id, "integration-candidate", ["verified"]);
+      if (task.role !== "verifier" || !integrationCandidate
+          || currentPacket?.id !== task.compiled_packet_id || currentPacket.status !== "ready"
+          || packet?.status !== "stale") return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function materializeFastPathPrerequisites(db, projectRoot, runId, credentials, config, options = {}) {
   const run = getRun(db, runId);
-  const ids = fastPathRecordIds(run.id);
+  // 기존 sealed fast 계획은 다섯 역할을 보존하고 새 materialization에만 v2를 적용한다.
+  const existingProfile = materializedFastPathProfile(db, projectRoot, run.id);
+  const profileVersion = existingProfile ?? FAST_PATH_PROFILE_VERSION;
+  const ids = fastPathRecordIds(run.id, profileVersion);
   assertController(db, run.id, credentials);
+  const priorExecutionSettings = previousPlanExecutionSettings(db, run);
+  invariant(!priorExecutionSettings || Object.hasOwn(options, "executionSettings"),
+    "FAST_PATH_EXECUTION_SETTINGS_REAPPROVAL", "이전 fast plan 승인 설정이 있으므로 새 실행 설정 승인이 필요합니다.");
+  invariant(run.route?.executionApprovalRequired !== true || Object.hasOwn(options, "executionSettings"),
+    "FAST_PATH_EXECUTION_SETTINGS_REQUIRED", "실행 승인 대상 fast plan을 materialize하려면 명시적인 실행 설정 승인이 필요합니다.");
   const contract = activeContract(db, run.id);
   const requirements = db.prepare("SELECT * FROM requirements WHERE run_id = ? AND status = 'active' ORDER BY id").all(run.id);
   const basis = fastPathBasis(run, contract, requirements);
@@ -185,6 +330,22 @@ export function materializeFastPathPrerequisites(db, projectRoot, runId, credent
     && Boolean(db.prepare("SELECT 1 FROM artifacts WHERE run_id = ? AND id = ? AND status = 'verified'").get(run.id, ids.artifactIds[4]))
     && Number(db.prepare(`SELECT COUNT(*) AS count FROM tasks WHERE run_id = ? AND id IN (${ids.taskIds.map(() => "?").join(",")})`).get(run.id, ...ids.taskIds)?.count ?? 0) === ids.taskIds.length;
   if (materialized) {
+    if (options && Object.hasOwn(options, "executionSettings")) {
+      const existingPlan = latestArtifact(db, projectRoot, run.id, "plan", ["verified"]);
+      const existingSettings = parsedArtifact(existingPlan).executionSettings;
+      const taskTargets = db.prepare("SELECT id, role FROM tasks WHERE run_id = ? ORDER BY created_at").all(run.id);
+      const requestedSettings = normalizePlanExecutionSettings(options, run, taskTargets);
+      const sameSettings = existingSettings?.mode === "exact"
+        && Array.isArray(existingSettings.entries)
+        && existingSettings.entries.length === requestedSettings.entries.length
+        && requestedSettings.entries.every((entry) => {
+          const currentEntry = existingSettings.entries.find((item) => item?.taskId === entry.taskId);
+          return currentEntry?.model === entry.model
+            && String(currentEntry?.requestedEffort ?? "").toLowerCase() === entry.requestedEffort
+            && currentEntry?.userApproval?.status === "approved";
+        });
+      invariant(sameSettings, "FAST_PATH_EXECUTION_SETTINGS_REAPPROVAL", "기존 fast 계획의 실행 설정이 달라졌습니다. plan을 다시 열고 새 설정을 승인해야 합니다.");
+    }
     // Replay is only idempotent when the exact deterministic plan approval and
     // every approved packet identity still describe the current task graph.
     // This also marks a ready packet stale when its blueprint has drifted.
@@ -200,7 +361,18 @@ export function materializeFastPathPrerequisites(db, projectRoot, runId, credent
       run, artifactIds: ids.artifactIds, taskId: ids.taskIds[0], taskIds: ids.taskIds, milestoneId: ids.milestoneId
     };
   }
-  const eligibility = fastPathEligibility(db, run.id, { config });
+  const staleCanonicalPlan = db.prepare("SELECT id FROM artifacts WHERE run_id = ? AND id = ? AND kind = 'plan' AND status = 'stale'")
+    .get(run.id, ids.artifactIds[3]);
+  const rematerializing = Boolean(staleCanonicalPlan);
+  const staleTaskIds = rematerializing ? ids.taskIds : [];
+  const staleCheckpointIds = rematerializing
+    ? db.prepare("SELECT id FROM checkpoints WHERE run_id = ? AND id LIKE ? AND status = 'pending'")
+      .all(run.id, `planned-execution-${run.id}-%`).map((item) => item.id)
+    : [];
+  const eligibility = fastPathEligibility(db, run.id, {
+    config,
+    ...(rematerializing ? { ignoreTaskIds: staleTaskIds, ignoreCheckpointIds: staleCheckpointIds } : {})
+  });
   invariant(eligibility.eligible, "FAST_PATH_INELIGIBLE", `Fast path is not eligible: ${eligibility.reasons.join("; ")}`);
   const requirement = requirements.length === 1 ? requirements[0] : null;
   const acceptance = parseJson(requirement.acceptance_json, []);
@@ -222,44 +394,63 @@ export function materializeFastPathPrerequisites(db, projectRoot, runId, credent
       requirementIds: [requirement.id], paths: eligibility.paths, interfaces: [], verification: ["Existing integration and adversarial review gates remain mandatory."]
     };
     const { artifactIds, milestoneId, taskIds } = ids;
-    const taskSpecs = [
-      {
-        id: taskIds[0], title: "Implement the bounded local change", goal: contract.objective,
-        role: "worker", taskKind: "implementation", phase: "execute", wave: 1, readOnly: false,
-        targetPaths: eligibility.paths, scope: eligibility.paths, verificationModes: ["test"],
-        acceptance, requiredEvidence: ["Current test evidence and owned-file references"],
-        contextRefs: ["artifact:goal-contract", "artifact:discovery", "artifact:design", "artifact:plan"],
-        expectedOutputs: ["implementation"], authority: "local-write-assigned-paths", dependsOn: []
-      },
-      {
-        id: taskIds[1], title: "Independently review the integrated change", goal: "Review the integrated bounded change without modifying it.",
-        role: "reviewer", taskKind: "review", phase: "review", wave: 1, readOnly: true,
-        targetPaths: [], scope: eligibility.paths, verificationModes: [], acceptance: ["Return an explicit integration-review verdict with current evidence."],
-        requiredEvidence: ["Current integrated repository fingerprint and source references"], contextRefs: ["artifact:plan"],
-        expectedOutputs: ["integration-review-result"], authority: "local-read", reviewKind: "integration", dependsOn: [taskIds[0]]
-      },
-      {
-        id: taskIds[2], title: "Independently verify the requirement", goal: "Verify the bounded requirement against the integrated repository.",
-        role: "verifier", taskKind: "verification", phase: "review", wave: 1, readOnly: true,
-        targetPaths: [], scope: eligibility.paths, verificationModes: ["test", "semantic"], acceptance,
-        requiredEvidence: ["Current independent verification evidence"], contextRefs: ["artifact:plan"],
-        expectedOutputs: ["verification-evidence"], authority: "local-read", dependsOn: [taskIds[0]]
-      },
-      {
-        id: taskIds[3], title: "Adversarially review the completion candidate", goal: "Challenge the current verification candidate for hidden failures.",
-        role: "adversarial-reviewer", taskKind: "review", phase: "verify", wave: 2, readOnly: true,
-        targetPaths: [], scope: eligibility.paths, verificationModes: [], acceptance: ["Return an explicit completion-review verdict with evidence-backed findings."],
-        requiredEvidence: ["Current verification-candidate fingerprint"], contextRefs: ["artifact:verification-candidate"],
-        expectedOutputs: ["completion-review-result"], authority: "local-read", reviewKind: "completion", dependsOn: [taskIds[1], taskIds[2]]
-      },
-      {
-        id: taskIds[4], title: "Curate verified final knowledge", goal: "Synchronize project knowledge using only verified final behavior.",
-        role: "curator", taskKind: "curation", phase: "curate", wave: 1, readOnly: true,
-        targetPaths: [], scope: eligibility.paths, verificationModes: [], acceptance: ["Knowledge synchronization reflects only verified final behavior."],
-        requiredEvidence: ["Current verification and completion-review evidence"], contextRefs: ["artifact:verification-candidate", "artifact:completion-review"],
-        expectedOutputs: ["artifact:knowledge-sync"], authority: "local-read", dependsOn: [taskIds[3]]
-      }
-    ];
+    const taskSpecs = profileVersion === FAST_PATH_PROFILE_VERSION
+      ? [
+        {
+          id: taskIds[0], title: "Implement the bounded local change", goal: contract.objective,
+          role: "worker", taskKind: "implementation", phase: "execute", wave: 1, readOnly: false,
+          targetPaths: eligibility.paths, scope: eligibility.paths, verificationModes: ["test"],
+          acceptance, requiredEvidence: ["Current test evidence and owned-file references"],
+          contextRefs: ["artifact:goal-contract", "artifact:discovery", "artifact:design", "artifact:plan"],
+          expectedOutputs: ["implementation"], authority: "local-write-assigned-paths", dependsOn: []
+        },
+        {
+          id: taskIds[1], title: "Independently verify the integrated change", goal: "Verify the bounded requirement against the immutable integrated candidate without modifying it.",
+          role: "verifier", taskKind: "verification", phase: "review", wave: 1, readOnly: true,
+          targetPaths: [], scope: eligibility.paths, verificationModes: ["test", "semantic"], acceptance,
+          requiredEvidence: ["Current independent verification evidence", "Immutable integrated-candidate reference"],
+          contextRefs: ["artifact:plan", "artifact:integration-candidate"],
+          expectedOutputs: ["verification-evidence"], authority: "local-read", dependsOn: [taskIds[0]]
+        }
+      ]
+      : [
+        {
+          id: taskIds[0], title: "Implement the bounded local change", goal: contract.objective,
+          role: "worker", taskKind: "implementation", phase: "execute", wave: 1, readOnly: false,
+          targetPaths: eligibility.paths, scope: eligibility.paths, verificationModes: ["test"],
+          acceptance, requiredEvidence: ["Current test evidence and owned-file references"],
+          contextRefs: ["artifact:goal-contract", "artifact:discovery", "artifact:design", "artifact:plan"],
+          expectedOutputs: ["implementation"], authority: "local-write-assigned-paths", dependsOn: []
+        },
+        {
+          id: taskIds[1], title: "Independently review the integrated change", goal: "Review the integrated bounded change without modifying it.",
+          role: "reviewer", taskKind: "review", phase: "review", wave: 1, readOnly: true,
+          targetPaths: [], scope: eligibility.paths, verificationModes: [], acceptance: ["Return an explicit integration-review verdict with current evidence."],
+          requiredEvidence: ["Current integrated repository fingerprint and source references"], contextRefs: ["artifact:plan"],
+          expectedOutputs: ["integration-review-result"], authority: "local-read", reviewKind: "integration", dependsOn: [taskIds[0]]
+        },
+        {
+          id: taskIds[2], title: "Independently verify the requirement", goal: "Verify the bounded requirement against the integrated repository.",
+          role: "verifier", taskKind: "verification", phase: "review", wave: 1, readOnly: true,
+          targetPaths: [], scope: eligibility.paths, verificationModes: ["test", "semantic"], acceptance,
+          requiredEvidence: ["Current independent verification evidence"], contextRefs: ["artifact:plan"],
+          expectedOutputs: ["verification-evidence"], authority: "local-read", dependsOn: [taskIds[0]]
+        },
+        {
+          id: taskIds[3], title: "Adversarially review the completion candidate", goal: "Challenge the current verification candidate for hidden failures.",
+          role: "adversarial-reviewer", taskKind: "review", phase: "verify", wave: 2, readOnly: true,
+          targetPaths: [], scope: eligibility.paths, verificationModes: [], acceptance: ["Return an explicit completion-review verdict with evidence-backed findings."],
+          requiredEvidence: ["Current verification-candidate fingerprint"], contextRefs: ["artifact:verification-candidate"],
+          expectedOutputs: ["completion-review-result"], authority: "local-read", reviewKind: "completion", dependsOn: [taskIds[1], taskIds[2]]
+        },
+        {
+          id: taskIds[4], title: "Curate verified final knowledge", goal: "Synchronize project knowledge using only verified final behavior.",
+          role: "curator", taskKind: "curation", phase: "curate", wave: 1, readOnly: true,
+          targetPaths: [], scope: eligibility.paths, verificationModes: [], acceptance: ["Knowledge synchronization reflects only verified final behavior."],
+          requiredEvidence: ["Current verification and completion-review evidence"], contextRefs: ["artifact:verification-candidate", "artifact:completion-review"],
+          expectedOutputs: ["artifact:knowledge-sync"], authority: "local-read", dependsOn: [taskIds[3]]
+        }
+      ];
     for (const task of taskSpecs) {
       task.capabilities = resolveTaskCapabilities(db, run.id, {
         role: task.role,
@@ -274,9 +465,13 @@ export function materializeFastPathPrerequisites(db, projectRoot, runId, credent
       "FAST_PATH_SPECIALIST_REVIEW",
       "Fast path implementation resolved a required specialist review."
     );
+    const executionSettings = normalizePlanExecutionSettings(options, current, taskSpecs);
+    invariant(current.route?.executionApprovalRequired !== true || executionSettings,
+      "FAST_PATH_EXECUTION_SETTINGS_REQUIRED", "실행 승인 대상 fast plan을 materialize하려면 명시적인 실행 설정 승인이 필요합니다.");
     const deterministicPlanDraft = {
       version: 1,
-      source: "bounded-fast-path",
+      source: profileVersion === FAST_PATH_PROFILE_VERSION ? FAST_PATH_V2_SOURCE : FAST_PATH_SOURCE,
+      ...(profileVersion === FAST_PATH_PROFILE_VERSION ? { fastPathProfileVersion: FAST_PATH_PROFILE_VERSION } : {}),
       parallelism: {
         eligible: false,
         minimumSameWaveImplementationTasks: 4,
@@ -292,7 +487,9 @@ export function materializeFastPathPrerequisites(db, projectRoot, runId, credent
       plannedTaskIds: [...taskIds]
     };
     const plan = {
-      version: 1, source: "bounded-fast-path", interfaces: [],
+      version: 1, source: profileVersion === FAST_PATH_PROFILE_VERSION ? FAST_PATH_V2_SOURCE : FAST_PATH_SOURCE,
+      ...(profileVersion === FAST_PATH_PROFILE_VERSION ? { fastPathProfileVersion: FAST_PATH_PROFILE_VERSION } : {}),
+      interfaces: [],
       milestones: [{ id: milestoneId, title: "Bounded implementation", objective: contract.objective,
         userVisibleOutcome: contract.successCriteria[0], exitCriteria: acceptance, requirementIds: [requirement.id] }],
       tasks: taskSpecs.map((task) => ({
@@ -303,22 +500,17 @@ export function materializeFastPathPrerequisites(db, projectRoot, runId, credent
         expectedOutputs: task.expectedOutputs, capabilities: task.capabilities.map((item) => item.name),
         reviewKind: task.reviewKind ?? null, dependsOn: task.dependsOn
       })),
-      planDraft: deterministicPlanDraft
+      planDraft: deterministicPlanDraft,
+      ...(executionSettings ? { executionSettings } : {})
     };
-    plan.planHash = sha256(stableStringify(plan));
-    putArtifact(db, projectRoot, run.id, "discovery", discovery, { id: artifactIds[0], status: "verified", metadata: { source: "bounded-fast-path", immutable: true } });
-    putArtifact(db, projectRoot, run.id, "research", { source: "bounded-fast-path", waived: true }, { id: artifactIds[1], status: "waived", metadata: { source: "bounded-fast-path" } });
-    putArtifact(db, projectRoot, run.id, "design", design, { id: artifactIds[2], status: "verified", metadata: { source: "bounded-fast-path", immutable: true } });
-    const planArtifact = putArtifact(db, projectRoot, run.id, "plan", plan, {
-      id: artifactIds[3],
-      status: "verified",
-      metadata: {
-        source: "bounded-fast-path",
-        planHash: plan.planHash,
-        planDraftHash: sha256(stableStringify(deterministicPlanDraft)),
-        immutable: true
-      }
-    });
+    const fastSource = profileVersion === FAST_PATH_PROFILE_VERSION ? FAST_PATH_V2_SOURCE : FAST_PATH_SOURCE;
+    const fastMetadata = {
+      source: fastSource,
+      ...(profileVersion === FAST_PATH_PROFILE_VERSION ? { fastPathProfileVersion: FAST_PATH_PROFILE_VERSION } : {})
+    };
+    putArtifact(db, projectRoot, run.id, "discovery", { ...discovery, source: fastSource }, { id: artifactIds[0], status: "verified", metadata: { ...fastMetadata, immutable: true } });
+    putArtifact(db, projectRoot, run.id, "research", { source: fastSource, waived: true }, { id: artifactIds[1], status: "waived", metadata: fastMetadata });
+    putArtifact(db, projectRoot, run.id, "design", { ...design, source: fastSource }, { id: artifactIds[2], status: "verified", metadata: { ...fastMetadata, immutable: true } });
     db.prepare(`INSERT OR IGNORE INTO milestones(
       id, run_id, title, objective, status, sequence, acceptance_json, entry_criteria_json,
       exit_criteria_json, user_visible_outcome, requirement_ids_json, created_at, updated_at
@@ -344,11 +536,63 @@ export function materializeFastPathPrerequisites(db, projectRoot, runId, credent
       );
       const route = selectModelRoute(config, task.role, { host: run.host, complexity: "low" });
       db.prepare(`
-        UPDATE tasks SET model_tier = ?, selected_model = ?, model_source = ?, reasoning_effort = ?
+        UPDATE tasks SET model_tier = ?, selected_model = ?, model_source = ?,
+          requested_effort = ?, effective_effort = ?, effort_source = ?,
+          supported_efforts_json = ?, capability_status = ?, reasoning_effort = ?
         WHERE run_id = ? AND id = ?
-      `).run(route.tier, route.model, route.modelSource, route.reasoningEffort, run.id, task.id);
+      `).run(
+        route.tier, route.model, route.modelSource,
+        route.requestedEffort, route.effectiveEffort, route.effortSource,
+        json(route.supportedEfforts ?? []), route.capabilityStatus ?? "known", route.reasoningEffort,
+        run.id, task.id
+      );
       bindTaskCapabilities(db, task.id, task.capabilities);
     }
+    if (executionSettings) applyPlanExecutionSettings(db, current, taskSpecs, executionSettings, config);
+    const routeRows = db.prepare(`SELECT id, model_tier, selected_model, model_source,
+      requested_effort, effective_effort, effort_source, supported_efforts_json, capability_status, reasoning_effort
+      FROM tasks WHERE run_id = ? ORDER BY created_at`).all(run.id);
+    const routeByTaskId = new Map(routeRows.map((row) => [row.id, row]));
+    plan.tasks = plan.tasks.map((task) => {
+      const route = routeByTaskId.get(task.id);
+      return {
+        ...task,
+        model: route?.selected_model ?? null,
+        requestedEffort: route?.requested_effort ?? null,
+        effectiveEffort: route?.effective_effort ?? null,
+        effortStatus: route?.capability_status ?? "unknown",
+        effortSource: route?.effort_source ?? null,
+        supportedEfforts: parseJson(route?.supported_efforts_json, []),
+        reasoningEffort: route?.reasoning_effort ?? null
+      };
+    });
+    if (executionSettings) {
+      plan.executionSettings = {
+        ...executionSettings,
+        entries: plan.tasks.map((task) => ({
+          taskId: task.id,
+          host: executionSettings.host,
+          model: task.model,
+          requestedEffort: task.requestedEffort,
+          effectiveEffort: task.effectiveEffort,
+          effortStatus: task.effortStatus,
+          effortSource: task.effortSource,
+          supportedEfforts: task.supportedEfforts,
+          userApproval: executionSettings.entries.find((entry) => entry.taskId === task.id)?.userApproval
+        }))
+      };
+    }
+    plan.planHash = sha256(stableStringify(plan));
+    const planArtifact = putArtifact(db, projectRoot, run.id, "plan", plan, {
+      id: artifactIds[3],
+      status: "verified",
+      metadata: {
+        ...fastMetadata,
+        planHash: plan.planHash,
+        planDraftHash: sha256(stableStringify(deterministicPlanDraft)),
+        immutable: true
+      }
+    });
     for (const task of taskSpecs) {
       for (const dependency of task.dependsOn) db.prepare("INSERT OR IGNORE INTO task_dependencies(task_id, depends_on) VALUES(?, ?)").run(task.id, dependency);
       db.prepare(`INSERT INTO trace_links(id, run_id, requirement_id, target_type, target_id, relation, status, evidence_refs_json, created_at, updated_at)
@@ -376,7 +620,9 @@ export function materializeFastPathPrerequisites(db, projectRoot, runId, credent
     const packetSetHash = sha256(stableStringify(normalizedPacketBindings(packetBindings)));
     const deterministicReview = {
       version: 5,
-      source: "bounded-fast-path",
+      ...(contract.route.executionApprovalRequired === true ? { executionApprovalEpoch: makeId("execution-approval") } : {}),
+      source: fastSource,
+      ...(profileVersion === FAST_PATH_PROFILE_VERSION ? { fastPathProfileVersion: FAST_PATH_PROFILE_VERSION } : {}),
       deterministic: true,
       planArtifactId: planArtifact.id,
       planContentRef: planArtifact.content_ref,
@@ -393,7 +639,8 @@ export function materializeFastPathPrerequisites(db, projectRoot, runId, credent
       id: artifactIds[4],
       status: "verified",
       metadata: {
-        source: "bounded-fast-path",
+        source: fastSource,
+        ...(profileVersion === FAST_PATH_PROFILE_VERSION ? { fastPathProfileVersion: FAST_PATH_PROFILE_VERSION } : {}),
         deterministic: true,
         planArtifactId: planArtifact.id,
         planContentRef: planArtifact.content_ref,
@@ -413,7 +660,8 @@ export function materializeFastPathPrerequisites(db, projectRoot, runId, credent
       packetSetHash,
       verdict: "APPROVED",
       blockingFindings: 0,
-      source: "bounded-fast-path"
+      source: fastSource,
+      ...(profileVersion === FAST_PATH_PROFILE_VERSION ? { fastPathProfileVersion: FAST_PATH_PROFILE_VERSION } : {})
     });
     const moved = db.prepare(`UPDATE runs SET phase = 'plan', updated_at = ?, revision = revision + 1
       WHERE id = ? AND phase = 'discover' AND controller_session_id = ? AND controller_owner = ?
@@ -421,6 +669,7 @@ export function materializeFastPathPrerequisites(db, projectRoot, runId, credent
       timestamp, run.id, credentials.sessionId, credentials.owner, credentials.token, Number(credentials.fencingToken)
     );
     invariant(moved.changes === 1, "CONTROLLER_FENCED", "Fast path materialization lost controller ownership.");
+    ensurePlannedExecutionCheckpoint(db, projectRoot, run.id, config);
     recordEvent(db, run.id, "fast-path.materialized", "info", { taskIds, paths: eligibility.paths, controllerFencingToken: credentials.fencingToken });
     return {
       run: getRun(db, run.id), artifactIds,
@@ -437,6 +686,8 @@ export function startRun(db, projectRoot, config, goal, options = {}) {
     if (existing.goal_hash !== sha256(normalizedGoal)) {
       throw new MetisError("ACTIVE_RUN_EXISTS", `Run ${existing.id} already controls this repository. Pause or complete it before starting another goal.`, { runId: existing.id });
     }
+    invariant(options.planOnly !== true || parseJson(existing.route_json, {}).executionApprovalRequired === true,
+      "RUN_PLAN_ONLY_MISMATCH", "기존 일반 실행을 plan-only 시작으로 재사용할 수 없습니다. 명시적으로 계약을 변경해야 합니다.");
     const supplied = options.controller ?? null;
     const same = supplied
       && supplied.sessionId === existing.controller_session_id
@@ -491,6 +742,9 @@ export function startRun(db, projectRoot, config, goal, options = {}) {
       }
       throw error;
     }
+    if (options.planOnly === true) {
+      db.prepare("UPDATE runs SET route_json = ? WHERE id = ?").run(json({ executionApprovalRequired: true }), id);
+    }
     initializeBudget(db, id, config);
     recordEvent(db, id, "run.started", "info", {
       goal: normalizedGoal, phase: "intake", controller: "metis",
@@ -533,6 +787,11 @@ export function putArtifact(db, projectRoot, runId, kind, content, options = {})
   const run = getRun(db, runId);
   const timestamp = now();
   const id = options.id ?? makeId("art");
+  const existingSource = db.prepare(`SELECT a.path FROM artifacts a WHERE a.id = ? AND EXISTS (
+    SELECT 1 FROM goal_contracts c WHERE json_extract(c.route_json, '$.sourceDocument.artifactId') = a.id
+  )`).get(id);
+  invariant(!existingSource || existingSource.path === (options.path ?? null), "GOAL_SOURCE_PATH_IMMUTABLE",
+    "계약에 연결된 source artifact 경로는 바꿀 수 없습니다. 새 PRD snapshot과 명시적인 contract amend를 사용하세요.");
   const contentRef = content === undefined || content === null
     ? null
     : storeObject(db, projectRoot, `artifact:${kind}`, typeof content === "string" ? content : stableStringify(content), { redact: true });
@@ -722,6 +981,8 @@ export function lifecycleRoute(route) {
   const canonical = route ?? {};
   invariant(!Object.hasOwn(canonical, "independentReviewRequired"), "LIFECYCLE_ROUTE_OBSOLETE", "Route field independentReviewRequired is obsolete; lifecycleProfile controls mandatory review gates.");
   invariant(!Object.hasOwn(canonical, "adversarialReviewRequired"), "LIFECYCLE_ROUTE_OBSOLETE", "Route field adversarialReviewRequired is obsolete; lifecycleProfile controls mandatory review gates.");
+  invariant(!Object.hasOwn(canonical, "executionApprovalRequired") || typeof canonical.executionApprovalRequired === "boolean",
+    "LIFECYCLE_EXECUTION_APPROVAL_BOOLEAN", "route.executionApprovalRequired는 boolean이어야 합니다.");
   const profile = canonical.lifecycleProfile;
   if (profile === "fast") {
     return { ...canonical, researchRequired: false, designRequired: false, specialistReviewRequired: false };
@@ -777,11 +1038,12 @@ function activeContract(db, runId) {
   } : null;
 }
 
-function planCurrent(db, projectRoot, runId, config) {
+function planCurrent(db, projectRoot, runId, config, validatePackets = true) {
   const plan = latestArtifact(db, projectRoot, runId, "plan", ["verified"]);
   if (!plan) return { pass: false, reason: "Sealed plan is missing." };
   const planData = parsedArtifact(plan);
-  const deterministicFastPlan = planData.source === "bounded-fast-path" || plan.metadata?.source === "bounded-fast-path";
+  const deterministicFastPlan = ["bounded-fast-path", "bounded-fast-path-v2"].includes(planData.source)
+    || ["bounded-fast-path", "bounded-fast-path-v2"].includes(plan.metadata?.source);
   const requireReview = config?.orchestration?.requirePlanCritic !== false || deterministicFastPlan;
   const review = requireReview ? latestArtifact(db, projectRoot, runId, "plan-review", ["verified"]) : null;
   if (!review) {
@@ -796,11 +1058,120 @@ function planCurrent(db, projectRoot, runId, config) {
   if (reviewData.planHash && planData.planHash && reviewData.planHash !== planData.planHash) {
     return { pass: false, reason: "Plan review hash does not match the current plan." };
   }
-  if (deterministicFastPlan) {
+  if (deterministicFastPlan && validatePackets) {
     const packets = fastPlanPacketsCurrent(db, runId, planData, review, reviewData, config);
     if (!packets.pass) return { pass: false, reason: packets.reason };
   }
   return { pass: true, plan, review, planData, reviewData };
+}
+
+function executionTaskRouteBinding(db, projectRoot, runId, planData) {
+  const executionPhases = new Set(["execute", "review", "verify", "curate"]);
+  const plannedTaskIds = (Array.isArray(planData?.tasks) ? planData.tasks : [])
+    .filter((task) => executionPhases.has(task?.runPhase))
+    .map((task) => String(task.id));
+  const currentTasks = db.prepare(`
+    SELECT * FROM tasks
+    WHERE run_id = ? AND phase IN ('execute', 'review', 'verify', 'curate')
+    ORDER BY id
+  `).all(runId);
+  const currentTaskIds = currentTasks.map((task) => String(task.id));
+  const sameTaskSet = plannedTaskIds.length === currentTaskIds.length
+    && new Set(plannedTaskIds).size === plannedTaskIds.length
+    && new Set(currentTaskIds).size === currentTaskIds.length
+    && plannedTaskIds.every((taskId) => currentTaskIds.includes(taskId));
+  if (!sameTaskSet) {
+    return {
+      pass: false,
+      reason: "현재 execution task set이 sealed plan과 일치하지 않습니다.",
+      plannedTaskIds,
+      currentTaskIds
+    };
+  }
+  for (const task of currentTasks) {
+    const binding = taskPlanExecutionSettingStatus(db, projectRoot, runId, task);
+    if (!binding.pass) {
+      return {
+        pass: false,
+        taskId: task.id,
+        reason: binding.reason,
+        current: binding.current ?? null,
+        approved: binding.entry ?? null
+      };
+    }
+  }
+  return { pass: true, plannedTaskIds, currentTaskIds };
+}
+
+// 실행 허가는 검토 결과가 아니라 현재 계약과 계획 seal에 묶인 별도 사용자 결정입니다.
+export function plannedExecutionApprovalStatus(db, projectRoot, runId, config = null) {
+  const run = getRun(db, runId);
+  const contract = activeContract(db, run.id);
+  const required = contract?.route.executionApprovalRequired === true || run.route.executionApprovalRequired === true;
+  const empty = { required, pass: !required, checkpointId: null, checkpoint: null, basis: null };
+  if (!required) return empty;
+  const effectiveConfig = config ?? loadConfig(projectRoot);
+  const hasReview = Boolean(db.prepare("SELECT 1 FROM artifacts WHERE run_id = ? AND kind = 'plan-review' AND status = 'verified'").get(run.id));
+  const current = planCurrent(db, projectRoot, run.id, {
+    ...effectiveConfig,
+    orchestration: { ...effectiveConfig.orchestration, ...(hasReview ? { requirePlanCritic: true } : {}) }
+  }, false); // 실행 중 packet 갱신은 정상입니다. packet 검증은 기존 execute 진입 gate가 담당합니다.
+  if (!current.pass) return { ...empty, reason: current.reason };
+  const contractMatches = current.planData.contract?.contractHash === contract?.contract_hash
+    || Number(current.reviewData?.contractVersion) === Number(contract?.version);
+  if (!contract || !contractMatches) {
+    return { ...empty, reason: "현재 계약에 해당하는 계획 seal이 필요합니다." };
+  }
+  const basis = {
+    contractVersion: contract.version,
+    contractHash: contract.contract_hash,
+    planArtifactId: current.plan.id,
+    planContentRef: current.plan.content_ref,
+    planHash: current.planData.planHash ?? null,
+    planUpdatedAt: current.plan.updated_at,
+    reviewArtifactId: current.review?.id ?? null,
+    reviewContentRef: current.review?.content_ref ?? null
+  };
+  const checkpointId = `planned-execution-${run.id}-${sha256(stableStringify(basis))}`;
+  const row = db.prepare("SELECT id FROM checkpoints WHERE id = ? AND run_id = ?").get(checkpointId, run.id);
+  const checkpoint = row ? getCheckpoint(db, checkpointId) : null;
+  const settings = planExecutionSettings(db, projectRoot, run.id);
+  if (settings.invalid || !settings.explicit) {
+    return {
+      required, pass: false, checkpointId, checkpoint, basis,
+      routeBinding: { pass: false, reason: settings.reason },
+      reason: settings.reason ?? "실행 승인 대상 plan에는 명시적인 실행 설정 승인이 필요합니다."
+    };
+  }
+  const routeBinding = executionTaskRouteBinding(db, projectRoot, run.id, current.planData);
+  if (!routeBinding.pass) {
+    return { required, pass: false, checkpointId, checkpoint, basis, routeBinding, reason: routeBinding.reason };
+  }
+  const pass = checkpoint?.kind === "authority" && checkpoint.blocking && checkpoint.status === "resolved";
+  return { required, pass: Boolean(pass), checkpointId, checkpoint, basis, routeBinding,
+    reason: pass ? null : "계획이 준비되었습니다. 명시적인 run 요청으로 현재 계획의 실행을 승인해야 합니다." };
+}
+
+export function ensurePlannedExecutionCheckpoint(db, projectRoot, runId, config = null) {
+  return transaction(db, () => {
+    const approval = plannedExecutionApprovalStatus(db, projectRoot, runId, config);
+    if (!approval.required) return approval;
+    // 이전 seal의 미결 gate는 폐기하되 실행 허가로 간주하지 않습니다.
+    const obsolete = db.prepare("SELECT id FROM checkpoints WHERE run_id = ? AND status = 'pending'").all(runId)
+      .filter((item) => item.id.startsWith(`planned-execution-${runId}-`) && item.id !== approval.checkpointId);
+    for (const item of obsolete) {
+      db.prepare("UPDATE checkpoints SET status = 'waived', resolution = ?, resolved_by = 'metis', resolved_at = ? WHERE id = ?")
+        .run("계약 또는 계획 seal 변경으로 폐기된 실행 승인입니다.", now(), item.id);
+      recordEvent(db, runId, "planned-execution.superseded", "info", { checkpointId: item.id });
+    }
+    if (!approval.basis || approval.checkpoint) return approval;
+    addCheckpoint(db, runId, {
+      id: approval.checkpointId, kind: "authority", blocking: true,
+      reason: "계획 전용 요청: 현재 계획의 실행에는 명시적인 run 승인이 필요합니다.",
+      requiredEvidence: [`artifact:${approval.basis.planArtifactId}`]
+    });
+    return plannedExecutionApprovalStatus(db, projectRoot, runId, config);
+  });
 }
 
 function designCurrent(db, projectRoot, runId, config) {
@@ -820,7 +1191,197 @@ function designCurrent(db, projectRoot, runId, config) {
   return { pass: true, seal, review, sealData, reviewData };
 }
 
+function normalizedAcceptanceValue(value) {
+  return String(value ?? "").trim().replace(/\s+/gu, " ").toLocaleLowerCase("en-US");
+}
+
+function acceptanceResultsAreCurrent(db, projectRoot, task, result) {
+  const criteria = parseJson(task.acceptance_json, []);
+  const results = asArray(result?.AcceptanceResults ?? result?.acceptanceResults);
+  if (!Array.isArray(criteria) || criteria.length === 0 || results.length < criteria.length) return false;
+  const topEvidence = asArray(result?.EvidenceRefs ?? result?.evidenceRefs);
+  if (topEvidence.length === 0 || !topEvidence.some((ref) => evidenceRefIsVerifiable(ref) && evidenceRefIsCurrent(db, projectRoot, ref))) return false;
+  const used = new Set();
+  return criteria.every((criterion, index) => {
+    const criterionValue = normalizedAcceptanceValue(typeof criterion === "string" ? criterion : criterion?.id ?? criterion?.criterion ?? criterion?.Criterion);
+    const foundIndex = results.findIndex((item, resultIndex) => {
+      if (used.has(resultIndex)) return false;
+      const resultCriterion = normalizedAcceptanceValue(typeof item === "string"
+        ? item
+        : item?.id ?? item?.criterionId ?? item?.criterion ?? item?.Criterion ?? (criteria.length === results.length ? criteria[resultIndex] : ""));
+      const status = normalizedAcceptanceValue(typeof item === "object" ? item?.status ?? item?.Status : "");
+      return (resultCriterion === criterionValue || (criteria.length === results.length && resultIndex === index))
+        && ["pass", "passed", "approved", "complete", "completed", "verified", "ok"].includes(status);
+    });
+    if (foundIndex < 0) return false;
+    used.add(foundIndex);
+    return true;
+  });
+}
+
+function fastPathV2TaskContext(db, projectRoot, runId, candidateKind = "integration-candidate") {
+  if (!isFastPathV2(db, projectRoot, runId)) return { pass: false, reason: "The run is not an authenticated fast-v2 materialization." };
+  const plan = latestArtifact(db, projectRoot, runId, "plan", ["verified"]);
+  const planData = parsedArtifact(plan);
+  const taskSpecs = Array.isArray(planData.tasks) ? planData.tasks : [];
+  const workerSpec = taskSpecs.find((task) => task?.role === "worker" && task?.runPhase === "execute");
+  const verifierSpec = taskSpecs.find((task) => task?.role === "verifier" && ["review", "verify"].includes(task?.runPhase));
+  if (!workerSpec || !verifierSpec || taskSpecs.length !== 2) return { pass: false, reason: "Fast-v2 plan must bind exactly one worker and one verifier." };
+  const worker = db.prepare("SELECT * FROM tasks WHERE run_id = ? AND id = ?").get(runId, workerSpec.id);
+  const verifier = db.prepare("SELECT * FROM tasks WHERE run_id = ? AND id = ?").get(runId, verifierSpec.id);
+  const candidate = latestArtifact(db, projectRoot, runId, candidateKind, ["verified"]);
+  if (!worker || !verifier || !candidate) return { pass: false, reason: `Fast-v2 ${candidateKind} or bound task is missing.` };
+  const workerResult = parseJson(worker.result_json, {});
+  const verifierResult = parseJson(verifier.result_json, {});
+  const workerAck = db.prepare(`SELECT attempt_fence, host_receipt, acknowledged_at FROM task_spawn_acks
+    WHERE task_id = ? AND attempt_fence = ? AND host_receipt IS NOT NULL AND length(trim(host_receipt)) > 0
+    ORDER BY acknowledged_at DESC LIMIT 1`).get(worker.id, Number(worker.attempt_fence));
+  const verifierAck = db.prepare(`SELECT attempt_fence, host_receipt, acknowledged_at FROM task_spawn_acks
+    WHERE task_id = ? AND attempt_fence = ? AND host_receipt IS NOT NULL AND length(trim(host_receipt)) > 0
+    ORDER BY acknowledged_at DESC LIMIT 1`).get(verifier.id, Number(verifier.attempt_fence));
+  const workerRequirements = parseJson(worker.requirement_ids_json, []);
+  const verifierRequirements = parseJson(verifier.requirement_ids_json, []);
+  const workerScope = parseJson(worker.scope_json, []);
+  const verifierScope = parseJson(verifier.scope_json, []);
+  const candidateData = parsedArtifact(candidate);
+  const verifierBaselineKind = candidateKind === "verification-candidate" ? "integration-candidate" : candidateKind;
+  const verifierBaseline = latestArtifact(db, projectRoot, runId, `task-baseline:${verifier.id}`, ["verified"]);
+  const integratedCandidate = latestArtifact(db, projectRoot, runId, "integration-candidate", ["verified"]);
+  const expectedBaseline = candidateKind === "verification-candidate" ? integratedCandidate : candidate;
+  const verifierBaselineData = parsedArtifact(verifierBaseline);
+  const currentFingerprint = repositoryCodeFingerprint(db);
+  const evidenceRefs = Array.isArray(verifierResult.EvidenceRefs) ? verifierResult.EvidenceRefs : [];
+  const acceptanceResults = Array.isArray(verifierResult.AcceptanceResults) ? verifierResult.AcceptanceResults : [];
+  const candidateVerifier = asArray(candidateData.verifierTasks).find((item) => item?.id === verifier.id);
+  const candidateEvidence = evidenceRefs.some((ref) => ref?.type === "artifact"
+    && ref.id === candidate.id && ref.contentRef === candidate.content_ref)
+    || (candidateKind === "verification-candidate"
+      && candidateVerifier
+      && candidateVerifier.status === "completed"
+      && stableStringify(asArray(candidateVerifier.acceptanceResults)) === stableStringify(acceptanceResults)
+      && stableStringify(asArray(candidateVerifier.evidenceRefs)) === stableStringify(evidenceRefs));
+  const checks = {
+    workerCompleted: worker.status === "completed" && String(workerResult.Status ?? "").toUpperCase() === "COMPLETED",
+    verifierCompleted: verifier.status === "completed" && String(verifierResult.Status ?? "").toUpperCase() === "COMPLETED",
+    workerReceipt: Boolean(workerAck?.host_receipt?.trim()),
+    verifierReceipt: Boolean(verifierAck?.host_receipt?.trim()),
+    distinctReceipts: Boolean(workerAck?.host_receipt && verifierAck?.host_receipt && workerAck.host_receipt !== verifierAck.host_receipt),
+    requirementsMatch: stableStringify(workerRequirements) === stableStringify(verifierRequirements),
+    scopeMatch: stableStringify(workerScope) === stableStringify(verifierScope),
+    testMode: asArray(parseJson(verifier.verification_modes_json, [])).includes("test"),
+    acceptance: acceptanceResultsAreCurrent(db, projectRoot, verifier, verifierResult),
+    evidence: evidenceRefs.length > 0 && evidenceRefs.every((ref) => evidenceRefIsVerifiable(ref) && evidenceRefIsCurrent(db, projectRoot, ref)),
+    candidateEvidence,
+    baselineKind: verifierBaselineData.subject?.kind === verifierBaselineKind,
+    baselineArtifact: verifierBaselineData.subject?.artifactId === expectedBaseline?.id,
+    baselineContent: verifierBaselineData.subject?.contentRef === expectedBaseline?.content_ref,
+    baselineFingerprint: verifierBaselineData.subject?.codeFingerprint === candidateData.codeFingerprint,
+    verificationCandidateBinding: candidateKind !== "verification-candidate"
+      || (candidateData.integrationReview?.artifactId === integratedCandidate?.id
+        && candidateData.integrationReview?.contentRef === integratedCandidate?.content_ref),
+    currentFingerprint: candidateData.codeFingerprint === currentFingerprint
+  };
+  const pass = Object.values(checks).every(Boolean);
+  return {
+    pass,
+    reason: pass ? null : "Fast-v2 requires completed worker and independent verifier receipts, test/acceptance evidence, matching scope and requirements, and a current candidate.",
+    checks,
+    plan,
+    planData,
+    worker,
+    verifier,
+    workerResult,
+    verifierResult,
+    workerAck,
+    verifierAck,
+    candidate,
+    candidateData,
+    currentFingerprint,
+    evidenceRefs,
+    acceptanceResults,
+    workerSpec,
+    verifierSpec
+  };
+}
+
+export function fastPathV2ApprovalCurrent(db, projectRoot, runId, reviewKind) {
+  const kind = reviewKind === "completion" ? "completion-review" : "integration-review";
+  const artifact = latestArtifact(db, projectRoot, runId, kind, ["verified"]);
+  if (!artifact) return { pass: false, reason: `${kind} approval is missing.` };
+  const data = parsedArtifact(artifact);
+  const candidateKind = reviewKind === "completion" ? "verification-candidate" : "integration-candidate";
+  const context = fastPathV2TaskContext(db, projectRoot, runId, candidateKind);
+  const fingerprint = data.fingerprint ?? {};
+  const valid = context.pass
+    && data.source === FAST_PATH_V2_SOURCE
+    && data.policy === "combined-independent-verification"
+    && data.fastPathProfileVersion === FAST_PATH_PROFILE_VERSION
+    && data.reviewKind === reviewKind
+    && data.verdict === "APPROVED"
+    && data.verifierTaskId === context.verifier.id
+    && fingerprint.artifactId === context.candidate.id
+    && fingerprint.contentRef === context.candidate.content_ref
+    && fingerprint.codeFingerprint === context.currentFingerprint;
+  return valid ? { pass: true, artifact, data } : { pass: false, reason: `Fast-v2 ${kind} approval is stale, unbound, or lacks independent verifier evidence.` };
+}
+
+export function materializeFastPathV2Approval(db, projectRoot, runId, reviewKind = "integration") {
+  invariant(["integration", "completion"].includes(reviewKind), "FAST_PATH_APPROVAL_KIND", "Fast-v2 approval kind must be integration or completion.");
+  const candidateKind = reviewKind === "completion" ? "verification-candidate" : "integration-candidate";
+  const existing = fastPathV2ApprovalCurrent(db, projectRoot, runId, reviewKind);
+  if (existing.pass) return existing;
+  const context = fastPathV2TaskContext(db, projectRoot, runId, candidateKind);
+  invariant(context.pass, "FAST_PATH_APPROVAL_EVIDENCE", context.reason, {
+    candidateId: context.candidate?.id ?? null,
+    verifierTaskId: context.verifier?.id ?? null,
+    workerTaskId: context.worker?.id ?? null,
+    checks: context.checks ?? {}
+  });
+  const fingerprint = {
+    artifactId: context.candidate.id,
+    contentRef: context.candidate.content_ref,
+    codeFingerprint: context.currentFingerprint
+  };
+  const content = {
+    version: 1,
+    source: FAST_PATH_V2_SOURCE,
+    fastPathProfileVersion: FAST_PATH_PROFILE_VERSION,
+    policy: "combined-independent-verification",
+    reviewKind,
+    verdict: "APPROVED",
+    derivedApproval: true,
+    separateReviewerPerformed: false,
+    subject: { kind: candidateKind, ...fingerprint },
+    fingerprint,
+    workerTaskId: context.worker.id,
+    verifierTaskId: context.verifier.id,
+    workerReceipt: { attemptFence: Number(context.workerAck.attempt_fence), hostReceipt: context.workerAck.host_receipt, acknowledgedAt: context.workerAck.acknowledged_at },
+    verifierReceipt: { attemptFence: Number(context.verifierAck.attempt_fence), hostReceipt: context.verifierAck.host_receipt, acknowledgedAt: context.verifierAck.acknowledged_at },
+    verifierEvidenceRefs: context.evidenceRefs,
+    acceptanceResults: context.acceptanceResults,
+    recordedAt: now()
+  };
+  const artifact = putArtifact(db, projectRoot, runId, reviewKind === "completion" ? "completion-review" : "integration-review", content, {
+    status: "verified",
+    metadata: {
+      source: FAST_PATH_V2_SOURCE,
+      fastPathProfileVersion: FAST_PATH_PROFILE_VERSION,
+      policy: "combined-independent-verification",
+      reviewKind,
+      derivedApproval: true,
+      separateReviewerPerformed: false,
+      verifierTaskId: context.verifier.id,
+      ...fingerprint
+    }
+  });
+  recordEvent(db, runId, "fast-path-v2.approval-created", "info", {
+    artifactId: artifact.id, reviewKind, verifierTaskId: context.verifier.id, ...fingerprint
+  });
+  return { pass: true, artifact, context, data: content };
+}
+
 function integrationReviewCurrent(db, projectRoot, runId) {
+  if (isFastPathV2(db, projectRoot, runId)) return fastPathV2ApprovalCurrent(db, projectRoot, runId, "integration");
   const artifact = latestArtifact(db, projectRoot, runId, "integration-review", ["verified"]);
   if (!artifact) return { pass: false, reason: "Integration review approval is missing." };
   const data = parsedArtifact(artifact);
@@ -840,6 +1401,7 @@ function integrationReviewCurrent(db, projectRoot, runId) {
 }
 
 function completionReviewCurrent(db, projectRoot, runId) {
+  if (isFastPathV2(db, projectRoot, runId)) return fastPathV2ApprovalCurrent(db, projectRoot, runId, "completion");
   const candidate = latestArtifact(db, projectRoot, runId, "verification-candidate", ["verified"]);
   const review = latestArtifact(db, projectRoot, runId, "completion-review", ["verified"]);
   if (!candidate || !review) return { pass: false, reason: "Verification candidate or adversarial completion review is missing." };
@@ -982,6 +1544,11 @@ export function gateReport(db, projectRoot, runId, targetPhase = null) {
       if (!governance.passForExecution) failures.push("Governance blockers must be resolved before planning execution.");
     }
 
+    if (["execute", "review", "verify", "curate", "complete"].includes(target)) {
+      const approval = plannedExecutionApprovalStatus(db, projectRoot, run.id, config);
+      if (approval.required) details.executionApproval = approval;
+      if (!approval.pass) failures.push(approval.reason);
+    }
     if (target === "execute") {
       const current = planCurrent(db, projectRoot, run.id, config);
       if (!current.pass) failures.push(current.reason);

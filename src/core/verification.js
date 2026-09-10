@@ -2,7 +2,7 @@ import { invariant } from "./errors.js";
 import { governanceReport } from "./governance.js";
 import { repositoryCodeFingerprint, syncRepository } from "./repository.js";
 import { reviewReport } from "./reviews.js";
-import { getRun, latestArtifact, lifecycleReviewRequired, lifecycleRoute, putArtifact, recordEvent } from "./state.js";
+import { getRun, isFastPathV2, latestArtifact, lifecycleReviewRequired, lifecycleRoute, materializeFastPathV2Approval, putArtifact, recordEvent } from "./state.js";
 import { listTasks } from "./tasks.js";
 import { listMilestones } from "./milestones.js";
 import { currentPlanDraftBinding } from "./plan-ingest.js";
@@ -305,6 +305,7 @@ export function createVerificationCandidate(db, projectRoot, runId, config) {
     decisions: staleDecisions.map((item) => item.id)
   });
 
+  const fastPathV2 = isFastPathV2(db, projectRoot, run.id);
   const codeFingerprint = integration.codeFingerprint;
   const content = {
     version: 1,
@@ -312,8 +313,9 @@ export function createVerificationCandidate(db, projectRoot, runId, config) {
     contractVersion: run.contract_version,
     codeFingerprint,
     integrationReview: integration.artifact ? {
-      artifactId: integration.artifact.id,
-      contentRef: integration.artifact.content_ref
+      // fast-v2는 verifier가 검사한 통합 후보에, 일반 경로는 독립 review artifact에 결속한다.
+      artifactId: fastPathV2 ? integration.candidate.id : integration.artifact.id,
+      contentRef: fastPathV2 ? integration.candidate.content_ref : integration.artifact.content_ref
     } : { waived: true },
     requirements: traceability.requirements.map((item) => ({
       id: item.id,
@@ -388,6 +390,10 @@ export function createVerificationCandidate(db, projectRoot, runId, config) {
       deterministic: true
     }
   });
+  if (isFastPathV2(db, projectRoot, run.id)) {
+    // 파생 완료 승인은 독립 verifier의 현재 receipt·증거에 결속되며 curator 검토를 대신 주장하지 않는다.
+    materializeFastPathV2Approval(db, projectRoot, run.id, "completion");
+  }
   recordEvent(db, run.id, "verification.candidate-created", "info", {
     artifactId: artifact.id,
     candidateHash,

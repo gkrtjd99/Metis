@@ -2,7 +2,7 @@ import { transaction } from "./db.js";
 import { invariant } from "./errors.js";
 import { assertOwnerSession, ownerBatch, ownerVerificationGaps } from "./owner-authority.js";
 import { abortScheduleBatch, acknowledgeScheduleSpawn, claimSchedule, handleChildTerminal, heartbeatScheduleBatch, proposeSchedule, refreshScheduleBatch } from "./scheduler.js";
-import { getTask, heartbeatTask } from "./tasks.js";
+import { childTaskContract, getTask, heartbeatTask } from "./tasks.js";
 
 function scopedOptions(session, lease, config, options = {}) {
   const maximum = Number(config.delegation?.ownerExecution?.maxConcurrentChildren ?? 4);
@@ -25,8 +25,11 @@ export function ownerNext(db, root, runId, ownerTaskId, lease, config) {
   const children = rows.slice(0, 24).map((row) => {
     const child = getTask(db, row.id);
     return {
-      taskId: child.id, role: child.role, status: child.status,
-      summary: String(child.result?.Summary ?? "").slice(0, 400)
+      taskId: child.id,
+      role: child.role,
+      status: child.status,
+      summary: String(child.result?.Summary ?? "").slice(0, 400),
+      ...childTaskContract(db, row.id)
     };
   });
   const common = { ownerTaskId, attemptFence: Number(session.owner.attempt_fence), childCount: rows.length, children, childrenTruncated: rows.length > children.length };
@@ -43,7 +46,7 @@ export function ownerNext(db, root, runId, ownerTaskId, lease, config) {
   if (proposal.batch.length) return {
     ...common, type: "SPAWN_BATCH", delivery: session.capability.mode === "host-relay" ? "host-relay" : "direct",
     tasks: session.capability.mode === "host-relay"
-      ? proposal.batch.map((item) => ({ taskId: item.taskId, role: item.role })) : proposal.batch,
+      ? proposal.batch.map((item) => ({ ...item })) : proposal.batch,
     deferred: proposal.deferred
   };
   const batches = db.prepare("SELECT id FROM scheduler_batches WHERE parent_task_id = ? AND status IN ('claimed','prepared','partially-spawned','spawned')").all(ownerTaskId);

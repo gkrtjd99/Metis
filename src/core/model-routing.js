@@ -87,14 +87,13 @@ export function negotiateEffort(requestedEffort, capability = {}) {
   // prevents a low request from being silently upgraded, while max can map to
   // the strongest value the model actually supports (for example xhigh).
   const requestedIndex = EFFORT_INDEX.get(requested);
-  const effective = supportedEfforts.filter((value) => EFFORT_INDEX.get(value) <= requestedIndex).at(-1)
-    ?? supportedEfforts[0];
+  const effective = supportedEfforts.filter((value) => EFFORT_INDEX.get(value) <= requestedIndex).at(-1) ?? null;
   return {
     requestedEffort: requested,
     effectiveEffort: effective,
     supportedEfforts,
     source,
-    capabilityStatus: "known"
+    capabilityStatus: effective ? "known" : "unsupported"
   };
 }
 
@@ -229,8 +228,10 @@ export function selectModelRoute(config, role, input = {}) {
   const benchmarkEffortPolicy = config.models?.benchmark?.enabled === true
     ? config.models?.benchmark?.efforts?.[role]
     : null;
-  if (benchmarkEffortPolicy) requested = normalizeEffort(benchmarkEffortPolicy, requested);
-  if (STRONG_ROLE_FLOOR.has(role) && !boundedWorker && !benchmarkEffortPolicy) requested = EFFORT_INDEX.get(requested) < EFFORT_INDEX.get("high") ? "high" : requested;
+  if (benchmarkEffortPolicy && input.explicitEffortApproval !== true) requested = normalizeEffort(benchmarkEffortPolicy, requested);
+  if (STRONG_ROLE_FLOOR.has(role) && !boundedWorker && !benchmarkEffortPolicy && input.explicitEffortApproval !== true) {
+    requested = EFFORT_INDEX.get(requested) < EFFORT_INDEX.get("high") ? "high" : requested;
+  }
 
   const tier = route.tier ?? "worker";
   const selection = resolveModelSelection(config, input.host, role, tier, input.model, base.model);

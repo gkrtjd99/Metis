@@ -1,11 +1,16 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   advancePhase,
   fastPathEligibility,
+  ensurePlannedExecutionCheckpoint,
   gateReport,
   getRun,
   lifecycleRoute,
   lifecycleReviewRequired,
   latestArtifact,
+  isFastPathV2,
+  materializeFastPathV2Approval,
   materializeFastPathPrerequisites,
   recordEvent
 } from "./state.js";
@@ -28,6 +33,9 @@ import { transaction } from "./db.js";
 import { assertController } from "./ownership.js";
 import { ownerRelayRequests } from "./owner-relay.js";
 import { MetisError, invariant } from "./errors.js";
+import { createVerificationCandidate } from "./verification.js";
+import { synchronizeKnowledge } from "./knowledge.js";
+import { evaluateRun } from "./evaluation.js";
 
 // Drive is deliberately a small deterministic reducer.  It may perform only
 // state transitions whose complete contract is already present in the action;
@@ -41,6 +49,35 @@ const DRIVE_STOP_TYPES = new Set([
   "BUDGET_DECISION_REQUIRED",
   "COMPLETE"
 ]);
+const RUNTIME_CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
+
+function runtimeInvocation(projectRoot, runId, args) {
+  const cwd = path.resolve(String(projectRoot));
+  return Object.freeze({ executable: process.execPath, args: ["--no-warnings", RUNTIME_CLI_PATH, "--root", cwd, "--run", String(runId), ...args], cwd });
+}
+
+function hostCompletionProtocol(taskIds, batchIds, config) {
+  return {
+    protocol: "metis.host-completion.v1",
+    taskIds: [...taskIds],
+    batchIds: [...batchIds],
+    // host 알림과 durable task.finished를 구분한다; 미지원 시 bounded fallback을 쓴다.
+    hostNotification: {
+      source: "host-native-process-or-session-notification",
+      providedBy: "host",
+      runtimeEmits: false,
+      optional: true
+    },
+    afterHostNotification: "check durable task state; if nonterminal, ingest terminal handoff and invoke task finish; only then call next",
+    durableRuntimeEvent: { type: "task.finished", taskIds: [...taskIds] },
+    fallback: {
+      mode: "bounded-wait",
+      waitSeconds: Math.max(1, Number(config.controller.heartbeatSeconds)),
+      heartbeatRequired: true,
+      doNotRepeatScheduleWakeupOrListAgents: true
+    }
+  };
+}
 
 function artifactExists(db, runId, kind, statuses = ["verified", "waived"]) {
   const placeholders = statuses.map(() => "?").join(",");
@@ -500,8 +537,40 @@ function predesignOverlapEnabled(config) {
   return config.orchestration?.lifecycleOverlap?.predesign === true;
 }
 
+function fastPathRematerializationOptions(db, runId) {
+  const stalePlan = db.prepare(`
+    SELECT id FROM artifacts
+    WHERE run_id = ? AND kind = 'plan' AND status = 'stale' AND id LIKE 'fast-path%'
+    ORDER BY updated_at DESC LIMIT 1
+  `).get(runId);
+  if (!stalePlan?.id || !String(stalePlan.id).endsWith("-plan")) return {};
+  const prefix = String(stalePlan.id).slice(0, -"-plan".length);
+  const taskSuffixes = prefix.startsWith("fast-path-v2-")
+    ? ["implementation", "verification"]
+    : ["implementation", "integration-review", "verification", "adversarial-review", "curation"];
+  const canonicalTaskIds = taskSuffixes.map((suffix) => `${prefix}-${suffix}`);
+  const taskIds = db.prepare(`SELECT id FROM tasks WHERE run_id = ? AND id IN (${canonicalTaskIds.map(() => "?").join(",")})`)
+    .all(runId, ...canonicalTaskIds).map((row) => row.id);
+  const checkpointPrefix = `planned-execution-${runId}-`;
+  const checkpointIds = db.prepare(`SELECT id, required_evidence_json FROM checkpoints
+      WHERE run_id = ? AND status = 'pending' AND id LIKE ?`)
+    .all(runId, `${checkpointPrefix}%`)
+    .filter((row) => {
+      const id = String(row.id);
+      const suffix = id.startsWith(checkpointPrefix) ? id.slice(checkpointPrefix.length) : "";
+      return /^[a-f0-9]{64}$/u.test(suffix)
+        && parseJson(row.required_evidence_json, []).includes(`artifact:${stalePlan.id}`);
+    })
+    .map((row) => row.id);
+  return { ignoreTaskIds: taskIds, ignoreCheckpointIds: checkpointIds };
+}
+
 export function fastPathEligibilityForRun(db, runId, config) {
-  return fastPathEligibility(db, runId, { config, isSafeRepoPath });
+  return fastPathEligibility(db, runId, {
+    config,
+    isSafeRepoPath,
+    ...fastPathRematerializationOptions(db, runId)
+  });
 }
 
 function advanceAction(db, projectRoot, run) {
@@ -518,6 +587,9 @@ function advanceAction(db, projectRoot, run) {
 function dispatchAction(db, projectRoot, run, config, parentTaskId = null) {
   const proposal = proposeSchedule(db, projectRoot, run.id, config, { parentTaskId });
   if (proposal.batch.length === 0) return null;
+  const claimArgs = ["schedule", "claim"];
+  if (parentTaskId) claimArgs.push("--parent-task", parentTaskId);
+  claimArgs.push("--pretty");
   return {
     type: "SPAWN_BATCH",
     phase: run.phase,
@@ -526,7 +598,17 @@ function dispatchAction(db, projectRoot, run, config, parentTaskId = null) {
     command: parentTaskId
       ? `metis schedule claim --parent-task ${parentTaskId} --pretty`
       : "metis schedule claim --pretty",
-    instruction: "Claim this deterministic batch, then spawn each returned contract with fork_turns=none."
+    // 호스트 메타데이터만 추가하며 controller credential은 포함하지 않는다.
+    invocation: runtimeInvocation(projectRoot, run.id, claimArgs),
+    hostProtocol: {
+      protocol: "metis.host-spawn.v1",
+      sequence: ["claim", "wait-prepared", "spawn-all", "ack-once", "wait-host-completion"],
+      claim: { invocation: runtimeInvocation(projectRoot, run.id, claimArgs), result: "prepared batch descriptors" },
+      spawn: { source: "claim.batch[*].spawn", requireAll: true, forkTurns: "none" },
+      ack: { mode: "single-batch", requireReceiptPerTask: true, allowPartialForRecovery: true },
+      completion: hostCompletionProtocol(proposal.batch.map((item) => item.taskId), [], config)
+    },
+    instruction: "Claim this deterministic batch, wait for prepared descriptors, spawn every returned contract with fork_turns=none, submit one ACK containing the real receipt for every task, then wait for host completion before the next action."
   };
 }
 
@@ -557,6 +639,12 @@ export function nextControllerAction(db, projectRoot, runId, config, options = {
   if (run.status === "blocked") return { type: "USER_OR_AUTHORITY_REQUIRED", phase: run.phase, instruction: "Resolve the recorded blocker, then run metis resume." };
   if (run.status === "completed" || run.phase === "complete") return { type: "COMPLETE", phase: "complete" };
 
+  const executionApproval = ensurePlannedExecutionCheckpoint(db, projectRoot, run.id, config);
+  if (executionApproval.required && !executionApproval.pass && executionApproval.basis) {
+    return { type: "USER_OR_AUTHORITY_REQUIRED", phase: run.phase,
+      checkpoints: executionApproval.checkpoint ? [executionApproval.checkpoint] : [],
+      executionApproval, instruction: executionApproval.reason };
+  }
   const checkpoints = checkpointStatus(db, run.id);
   const immediateCheckpoints = checkpoints.blocking.filter((item) => ["decision", "authority", "external"].includes(item.kind));
   if (immediateCheckpoints.length > 0 || (run.phase === "curate" && checkpoints.blocking.length > 0)) {
@@ -647,10 +735,12 @@ export function nextControllerAction(db, projectRoot, runId, config, options = {
     const heartbeatBatches = schedulerBatches.filter((batch) => !batch.stalePreparation);
     const stalePreparation = schedulerBatches.filter((batch) => batch.stalePreparation);
     const ownerRelay = ownerRelayRequests(db, run.id, config);
+    const runningTaskIds = state.running.map((item) => item.id);
     return {
       type: "WAIT_FOR_AGENTS",
       phase: run.phase,
       taskIds: state.running.filter((item) => !ownedByRunningCoordinator(item)).map((item) => item.id),
+      completionProtocol: hostCompletionProtocol(runningTaskIds, batches, config),
       ownerManagedChildren: state.running.filter(ownedByRunningCoordinator).length,
       ownerRelay,
       ...(ownerRelay.requests.length ? {
@@ -952,6 +1042,10 @@ export function nextControllerAction(db, projectRoot, runId, config, options = {
     case "execute":
       return { ...common, type: "EXECUTION_GRAPH_EMPTY", instruction: "No execution task is runnable. Inspect packet status, dependencies, waves, milestone state, and diagnoses. Reopen plan when the graph is wrong." };
     case "review": {
+      if (isFastPathV2(db, projectRoot, run.id) && !artifactExists(db, run.id, "integration-review", ["verified"])) {
+        return { ...common, type: "MATERIALIZE_FAST_PATH_APPROVAL", operation: "materializeFastPathV2Approval",
+          command: "metis drive --pretty", instruction: "완료된 독립 verifier의 현재 증거로 통합 승인을 생성한다. 별도 reviewer 결과를 만들지 않는다." };
+      }
       if (!lifecycleReviewRequired(route, config, "integration")) {
         return { ...common, type: "SKIP_INTEGRATION_REVIEW", instruction: "The frozen Goal Contract waives independent integration review for this bounded goal." };
       }
@@ -977,6 +1071,10 @@ export function nextControllerAction(db, projectRoot, runId, config, options = {
       break;
     }
     case "curate":
+      if (isFastPathV2(db, projectRoot, run.id) && !artifactExists(db, run.id, "knowledge-sync", ["verified"])) {
+        return { ...common, type: "SYNCHRONIZE_FAST_PATH_KNOWLEDGE", operation: "synchronizeKnowledge",
+          command: "metis drive --pretty", instruction: "현재 독립 검증 승인에서 파생된 지식 기록만 생성한다. 의미 검토를 수행했다고 표시하지 않는다." };
+      }
       if (!artifactExists(db, run.id, "knowledge-sync", ["verified"])) return { ...common, type: "PLAN_CURATION_TASK", instruction: "Dispatch a curator task for human documentation. Run deterministic knowledge indexing only after its result integrates." };
       if (!artifactExists(db, run.id, "self-evaluation", ["verified"])) return { ...common, type: "SELF_EVALUATE", command: "metis evaluate --pretty" };
       break;
@@ -1026,6 +1124,7 @@ export function driveController(db, projectRoot, runId, credentials, config, opt
   const maxIterations = Math.min(Number(requested), MAX_DRIVE_ITERATIONS);
   const applied = [];
   let lastAction = null;
+  let pendingExecutionSettings = options.executionSettings;
   const finish = (result) => {
     recordEvent(db, runId, "performance.controller-deterministic", "info", {
       durationMs: Math.round((performance.now() - deterministicStarted) * 100) / 100,
@@ -1052,6 +1151,16 @@ export function driveController(db, projectRoot, runId, credentials, config, opt
       });
     }
 
+    if (pendingExecutionSettings !== undefined && action.type !== "MATERIALIZE_FAST_PATH_PREREQUISITES") {
+      return finish({
+        type: "UNRECOVERABLE_BLOCKER", runId, iterations: iteration, maxIterations, applied, action,
+        blocker: {
+          code: "DRIVE_EXECUTION_SETTINGS_UNEXPECTED",
+          message: "Drive execution settings are accepted only when materializing fast-path prerequisites. Reopen the plan before changing them."
+        }
+      });
+    }
+
     if (DRIVE_STOP_TYPES.has(action.type)) {
       return finish({ type: action.type, runId, iterations: iteration, maxIterations, applied, action });
     }
@@ -1063,7 +1172,20 @@ export function driveController(db, projectRoot, runId, credentials, config, opt
         result = advancePhase(db, projectRoot, runId, action.targetPhase);
       } else if (action.type === "MATERIALIZE_FAST_PATH_PREREQUISITES") {
         assertController(db, runId, credentials, { heartbeat: true, leaseSeconds: config.controller.leaseSeconds });
-        result = materializeFastPathPrerequisites(db, projectRoot, runId, credentials, config);
+        result = materializeFastPathPrerequisites(db, projectRoot, runId, credentials, config, {
+          ...(pendingExecutionSettings === undefined ? {} : { executionSettings: pendingExecutionSettings })
+        });
+        pendingExecutionSettings = undefined;
+      } else if (["MATERIALIZE_FAST_PATH_APPROVAL", "CREATE_VERIFICATION_CANDIDATE", "SYNCHRONIZE_FAST_PATH_KNOWLEDGE", "SELF_EVALUATE"].includes(action.type)
+        && isFastPathV2(db, projectRoot, runId)) {
+        assertController(db, runId, credentials, { heartbeat: true, leaseSeconds: config.controller.leaseSeconds });
+        if (action.type === "MATERIALIZE_FAST_PATH_APPROVAL") result = materializeFastPathV2Approval(db, projectRoot, runId, "integration");
+        else if (action.type === "CREATE_VERIFICATION_CANDIDATE") result = createVerificationCandidate(db, projectRoot, runId, config);
+        else if (action.type === "SELF_EVALUATE") result = evaluateRun(db, projectRoot, runId, config);
+        else {
+          result = synchronizeKnowledge(db, projectRoot, runId, config);
+          invariant(result.clean, "FAST_PATH_KNOWLEDGE_BLOCKED", "현재 독립 검증 승인 또는 지식 동기화 근거가 충족되지 않았습니다.");
+        }
       } else if (MATERIALIZABLE_WAVE_TYPES.has(action.type)) {
         assertController(db, runId, credentials, { heartbeat: true, leaseSeconds: config.controller.leaseSeconds });
         result = materializeControllerTaskWave(db, projectRoot, runId, action, credentials, config);

@@ -1,6 +1,6 @@
 interface:
   display_name: "Metis"
-  short_description: "Run an explicit managed coding goal"
-  default_prompt: "Use /goal $metis \"<objective>\" to run a managed development goal end to end."
+  short_description: "목표 기록·계획·실행·복원을 명시적으로 선택"
+  default_prompt: '$metis prd "<아이디어>"와 $metis plan "<목표>"는 문서·계획까지만 진행합니다. $metis run/resume/status는 현재 run을 실행·복원·조회합니다. /goal $metis "<목표>"는 legacy 실행 경로입니다.'
 policy:
   allow_implicit_invocation: false

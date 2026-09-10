@@ -256,7 +256,12 @@ test("verifier and curator tasks are first-class phase work", () => {
       Status: "COMPLETED",
       Files: [],
       Summary: "Final source exports value.",
-      EvidenceRefs: ["src/value.js:1"]
+      EvidenceRefs: ["src/value.js:1"],
+      AcceptanceResults: [{
+        criterion: "Return evidence",
+        status: "passed",
+        EvidenceRefs: [{ type: "artifact", id: integrationCandidate.id, contentRef: integrationCandidate.content_ref }]
+      }]
     }, config);
     const currentGraph = plannedGraphFingerprint(db, run.id);
     assert.equal(currentGraph.hash, approvedPlan.draft.graph.hash, JSON.stringify({

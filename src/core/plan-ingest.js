@@ -288,6 +288,47 @@ function validateMilestoneDraft(item, db, run) {
   requirementIdsForDraft(db, run.id, requirementIds, "Milestone");
 }
 
+const CONCRETE_SLICE_ROLES = new Set(["worker", "integrator", "verifier", "adversarial-reviewer"]);
+const VALID_TASK_RISKS = new Set(["low", "medium", "high", "critical"]);
+const VALID_TASK_EFFORTS = new Set(["small", "medium", "large"]);
+const VALID_SLICE_TYPES = new Set([
+  "vertical", "horizontal", "mechanical", "review", "verification", "discovery", "research",
+  "synthesis", "design", "planning", "compilation", "integration", "diagnosis", "repair", "curation"
+]);
+const GENERIC_SLICE_TEXT = new Set([
+  "implementation", "implementation task", "verification", "verification task", "review", "review task",
+  "implement feature", "implement the feature", "implement task", "implement the task",
+  "verify feature", "verify the feature", "verify task", "verify the task",
+  "너 구현", "너 검증"
+]);
+
+function normalizedTaskText(value) {
+  return String(value ?? "").trim().replace(/\\s+/gu, " ").toLocaleLowerCase("en-US");
+}
+
+function isGenericSliceText(value) {
+  const normalized = normalizedTaskText(value);
+  return GENERIC_SLICE_TEXT.has(normalized)
+    || /^(?:implement|verify|review)(?: the)? (?:feature|task|change|work)$/iu.test(normalized);
+}
+
+function concreteTaskArray(item, key, label) {
+  return requiredArray(item, key, label, { nonEmpty: true, code: "TASK_SLICE_CONTRACT" });
+}
+
+function validateConcreteSliceContract(item, role, readOnly) {
+  invariant(!isGenericSliceText(item.title) && !isGenericSliceText(item.goal), "TASK_SLICE_BOUNDARY",
+    `Task ${item.id} must name a concrete outcome; role-only implementation or verification text is not a bounded slice.`);
+  for (const field of ["scope", "nonGoals", "constraints", "acceptanceCriteria", "requiredEvidence", "expectedOutputs", "verificationModes"]) {
+    concreteTaskArray(item, field, `Task ${field}`);
+  }
+  if (!readOnly) concreteTaskArray(item, "targetPaths", "Task targetPaths");
+  for (const [field, values] of [["risk", VALID_TASK_RISKS], ["effort", VALID_TASK_EFFORTS], ["sliceType", VALID_SLICE_TYPES]]) {
+    const value = requiredCanonicalString(item, field, `Task ${field}`, "TASK_SLICE_CONTRACT").toLowerCase();
+    invariant(values.has(value), "TASK_SLICE_CONTRACT", `Task ${field} has unsupported value ${value}.`);
+  }
+}
+
 function validateTaskDraft(item, db, run) {
   invariant(plainObject(item), "PLAN_DRAFT_TASK", "Every task draft must be an object.");
   forbiddenAliases(item, "task");
@@ -313,12 +354,19 @@ function validateTaskDraft(item, db, run) {
     curator: new Set(["curate"])
   };
   invariant(TASK_KINDS_BY_ROLE[role]?.includes(taskKind), "TASK_KIND_INVALID", `Task role ${role} does not support task kind ${taskKind}.`);
-  for (const field of ["title", "goal"]) requiredCanonicalString(item, field, `Task ${field}`);
+  const title = requiredCanonicalString(item, "title", "Task title");
+  const goal = requiredCanonicalString(item, "goal", "Task goal");
   invariant(!rolePhases[role] || rolePhases[role].has(runPhase), "PLAN_DRAFT_TASK_PHASE", `Task role ${role} must use its canonical runPhase; ${runPhase} is not allowed.`);
   invariant(Number.isInteger(item.wave) && item.wave > 0, "TASK_WAVE", "Task wave must be a positive integer.");
   invariant(typeof item.readOnly === "boolean", "PLAN_DRAFT_FIELDS", "Task readOnly must be boolean.");
   for (const field of ["targetPaths", "scope", "acceptanceCriteria", "requiredEvidence", "expectedOutputs", "requirementIds", "dependsOn", "interfaceInputs", "interfaceOutputs"]) {
     requiredArray(item, field, `Task ${field}`);
+  }
+  for (const field of ["nonGoals", "constraints", "verificationModes", "stopConditions", "capabilities"]) {
+    if (Object.hasOwn(item, field)) requiredArray(item, field, `Task ${field}`);
+  }
+  if (CONCRETE_SLICE_ROLES.has(role)) {
+    validateConcreteSliceContract({ ...item, title, goal }, role, item.readOnly);
   }
   requirementIdsForDraft(db, run.id, item.requirementIds, "Task");
 }

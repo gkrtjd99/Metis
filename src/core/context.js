@@ -12,7 +12,7 @@ import { traceabilityReport } from "./traceability.js";
 import { governanceReport } from "./governance.js";
 import { reviewReport } from "./reviews.js";
 import { getGoalContract } from "./contracts.js";
-import { makeId, parseJson, sha256, truncateMiddle } from "./util.js";
+import { makeId, parseJson, redactSecrets, sha256, truncateMiddle } from "./util.js";
 
 export { estimateTokens } from "./tokens.js";
 
@@ -407,7 +407,7 @@ export function buildMainContext(db, projectRoot, runId, config, requested = nul
   const tokenBudget = effectiveContextBudget(config, options.tokenBudget, remainingTokens);
   const model = options.model ?? config.budgets.model ?? null;
   const tasks = listTasks(db, run.id);
-  const runnable = getRunnableTasks(db, run.id, config.orchestration.maxConcurrent);
+  const runnable = options.recovery ? [] : getRunnableTasks(db, run.id, config.orchestration.maxConcurrent);
   const taskView = mainTaskView(tasks, runnable);
   const contract = activeContract(db, run.id);
   const requirements = db.prepare("SELECT * FROM requirements WHERE run_id = ? AND status <> 'superseded' ORDER BY priority, id").all(run.id);
@@ -418,7 +418,8 @@ export function buildMainContext(db, projectRoot, runId, config, requested = nul
   const checks = listChecks(db, run.id);
   const pendingDocs = listDocumentImpacts(db, run.id, "pending");
   const milestones = milestoneSummary(db, run.id);
-  const materializedKinds = new Set(PHASE_ARTIFACT_DEPENDENCIES[run.phase] ?? []);
+  // 복원은 phase 원문과 credential metadata 대신 별도 안전한 handle만 전달한다.
+  const materializedKinds = new Set(options.recovery ? [] : PHASE_ARTIFACT_DEPENDENCIES[run.phase] ?? []);
   const artifactOptions = (kind) => ({
     materialize: materializedKinds.has(kind),
     materializer: options.materializer
@@ -439,7 +440,8 @@ export function buildMainContext(db, projectRoot, runId, config, requested = nul
   const governance = governanceReport(db, run.id, config);
   const budget = budgetStatus(db, run.id);
   const progress = progressStatus(db, run.id, config);
-  const gate = gateReport(db, projectRoot, run.id);
+  // 복원 중에는 gateReport의 repository 재탐색과 milestone 갱신을 실행하지 않는다.
+  const gate = options.recovery ? { pass: false, failures: [] } : gateReport(db, projectRoot, run.id);
   const ownerWaiting = [...taskView.aggregates.values()].some((aggregate) => (
     aggregate.descendantCount > 0 && Number(aggregate.statusCounts.running ?? 0) > 0
   ));
@@ -469,7 +471,33 @@ export function buildMainContext(db, projectRoot, runId, config, requested = nul
     findings, staleFindings, checks, pendingDocs, discovery, research, design, planReview,
     workspaceBaseline, reviews, trace, governance, budget, progress, events, materializedKinds
   });
-  const fitted = fitSections(db, sections, tokenBudget, { config, model, observedTokens: options.observedTokens });
+  const sourceDocument = contract?.route?.sourceDocument;
+  const sourceHandle = sourceDocument && typeof sourceDocument.artifactId === "string"
+    && /^[-A-Za-z0-9_.]{1,128}$/u.test(sourceDocument.artifactId)
+    && /^obj_[0-9a-f]{64}$/u.test(sourceDocument.contentRef)
+    ? {
+      artifactId: sourceDocument.artifactId,
+      contentRef: sourceDocument.contentRef,
+      loadInstructions: {
+        artifact: `metis artifact get ${sourceDocument.artifactId}`,
+        object: `metis object get ${sourceDocument.contentRef}`
+      }
+    } : null;
+  // 원본 handle은 compact 본문이 잘리더라도 구조화된 반환값에 남긴다.
+  if (sourceHandle) sections.unshift(section("source", "Original Request Snapshot", JSON.stringify(sourceHandle), 101, true));
+  const selectedSections = options.recovery
+    ? sections.filter((item) => ["goal", "requirements", "phase", "next", "blockers", "source"].includes(item.id)).map((item) => {
+      const lines = item.body.split("\n");
+      const limit = options.recoveryLimit ?? 12;
+      const visible = lines.slice(0, limit).map((line) => truncateMiddle(redactSecrets(line), options.recoveryTextLimit ?? 400));
+      return { ...item, body: `${visible.join("\n")}\n- Projection: limit=${limit}; omitted=${Math.max(0, lines.length - visible.length)}` };
+    })
+    : sections;
+  // 복원은 설정된 외부 tokenizer 명령도 실행하지 않고 로컬 추정만 사용한다.
+  const measurementConfig = options.recovery
+    ? { ...config, budgets: { ...config.budgets, tokenizer: { mode: "estimate" } } }
+    : config;
+  const fitted = fitSections(db, selectedSections, tokenBudget, { config: measurementConfig, model, observedTokens: options.observedTokens });
   const essentialIds = ["goal", "requirements", "phase", "next", "blockers"];
   const included = new Set(fitted.includedIds);
   const quality = {
@@ -501,7 +529,9 @@ export function buildMainContext(db, projectRoot, runId, config, requested = nul
     remainingTokens,
     contentRef: ref,
     quality,
-    action
+    action,
+    originalRequest: { runId: run.id, field: "runs.goal" },
+    ...(sourceHandle ? { sourceDocument: sourceHandle } : {})
   };
 }
 
@@ -640,6 +670,71 @@ function compactBackground(background) {
   }).filter(Boolean);
 }
 
+function compactChildArray(value, maxItems = 12, maxChars = COMPACT_TEXT_MAX) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, maxItems).map((item) => boundedString(String(item), maxChars)).filter((item) => item !== null);
+}
+
+function compactChildTask(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const taskId = boundedIdentity(value.TaskId ?? value.taskId);
+  if (!taskId) return null;
+  const parentTaskId = boundedIdentity(value.ParentTaskId ?? value.parentTaskId);
+  const slice = value.Slice && typeof value.Slice === "object" && !Array.isArray(value.Slice) ? value.Slice : {};
+  const interfaces = value.Interfaces && typeof value.Interfaces === "object" && !Array.isArray(value.Interfaces)
+    ? value.Interfaces : {};
+  return {
+    TaskId: taskId,
+    ParentTaskId: parentTaskId,
+    Slice: {
+      Name: boundedString(slice.Name ?? slice.name),
+      Outcome: boundedString(slice.Outcome ?? slice.outcome, 400),
+      Role: boundedIdentity(slice.Role ?? slice.role),
+      TaskKind: boundedIdentity(slice.TaskKind ?? slice.taskKind),
+      RunPhase: boundedIdentity(slice.RunPhase ?? slice.runPhase),
+      Wave: Number.isFinite(Number(slice.Wave ?? slice.wave)) ? Number(slice.Wave ?? slice.wave) : null,
+      Status: boundedIdentity(slice.Status ?? slice.status)
+    },
+    Role: boundedIdentity(value.Role ?? value.role),
+    TaskKind: boundedIdentity(value.TaskKind ?? value.taskKind),
+    Title: boundedString(value.Title ?? value.title),
+    Goal: boundedString(value.Goal ?? value.goal, 400),
+    Wave: Number.isFinite(Number(value.Wave ?? value.wave)) ? Number(value.Wave ?? value.wave) : null,
+    RunPhase: boundedIdentity(value.RunPhase ?? value.runPhase),
+    Status: boundedIdentity(value.Status ?? value.status),
+    ReadOnly: Boolean(value.ReadOnly ?? value.readOnly),
+    DependsOn: compactChildArray(value.DependsOn ?? value.dependsOn),
+    RequirementIds: compactChildArray(value.RequirementIds ?? value.requirementIds),
+    TargetPaths: compactChildArray(value.TargetPaths ?? value.targetPaths),
+    Scope: compactChildArray(value.Scope ?? value.scope),
+    NonGoals: compactChildArray(value.NonGoals ?? value.nonGoals),
+    Constraints: compactChildArray(value.Constraints ?? value.constraints),
+    AcceptanceCriteria: compactChildArray(value.AcceptanceCriteria ?? value.acceptanceCriteria),
+    RequiredEvidence: compactChildArray(value.RequiredEvidence ?? value.requiredEvidence),
+    ExpectedOutputs: compactChildArray(value.ExpectedOutputs ?? value.expectedOutputs),
+    VerificationModes: compactChildArray(value.VerificationModes ?? value.verificationModes),
+    Risk: boundedIdentity(value.Risk ?? value.risk),
+    Effort: boundedIdentity(value.Effort ?? value.effort),
+    SliceType: boundedIdentity(value.SliceType ?? value.sliceType),
+    Interfaces: {
+      Inputs: compactChildArray(interfaces.Inputs ?? interfaces.inputs),
+      Outputs: compactChildArray(interfaces.Outputs ?? interfaces.outputs)
+    },
+    StopConditions: compactChildArray(value.StopConditions ?? value.stopConditions),
+    ProgressSummary: boundedString(value.ProgressSummary ?? value.progressSummary, 400)
+  };
+}
+
+function compactChildTasks(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 24).map(compactChildTask).filter(Boolean);
+}
+
+function compactChildTaskIds(value, children) {
+  const ids = Array.isArray(value) ? value : children.map((item) => item?.TaskId ?? item?.taskId);
+  return ids.slice(0, 64).map(boundedIdentity).filter(Boolean);
+}
+
 function fitClippedExecution(execution, packetLoadInstruction, tokenBudget, options) {
   const prompt = String(execution.CompiledPrompt ?? "");
   const config = options.config;
@@ -721,6 +816,9 @@ export function compactTaskContract(contract, tokenBudget, options = {}) {
     // evidence behind an authenticated load handle. Do not duplicate that
     // prose in the host envelope; preserve the typed handles and loader.
     Background: isPlanCritic ? [] : compactBackground(Array.isArray(contract.Background) ? contract.Background.slice(0, 8) : []),
+    // Child decomposition is part of the coordinator boundary, not optional prose.
+    ChildTasks: isPlanCritic ? [] : compactChildTasks(contract.ChildTasks),
+    ChildTaskIds: isPlanCritic ? [] : compactChildTaskIds(contract.ChildTaskIds, contract.ChildTasks ?? []),
     // Keep this transport separate from duplicated predecessor prose.  It is
     // intentionally deterministic and carries every predecessor handle even
     // when the human-readable Background is bounded to the first eight items.

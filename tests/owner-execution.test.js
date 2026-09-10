@@ -127,14 +127,22 @@ function ackChildren(value, claimed, taskIds = null, prefix = "child-host") {
 }
 
 function complete(value, item, result = {}) {
-  return finishTask(value.db, value.root, value.run.id, item.taskId, item.leaseToken, {
+  const completion = {
     Status: "COMPLETED",
     Files: [],
     Summary: result.Summary ?? `Completed ${item.taskId}.`,
     EvidenceRefs: result.EvidenceRefs ?? [],
     Blockers: [],
     ...result
-  }, value.config);
+  };
+  if (item.role === "verifier" && completion.AcceptanceResults === undefined) {
+    completion.AcceptanceResults = item.acceptanceCriteria.map((criterion) => ({
+      criterion,
+      status: "passed",
+      EvidenceRefs: [{ type: "source", path: "package.json", startLine: 1, endLine: 1 }]
+    }));
+  }
+  return finishTask(value.db, value.root, value.run.id, item.taskId, item.leaseToken, completion, value.config);
 }
 
 function assertOwnerGuard(error) {

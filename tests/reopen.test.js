@@ -50,7 +50,12 @@ test("reopening execution invalidates downstream evidence and reschedules future
     forcePhase(db, root, config, run.id, "verify");
     const verifier = claimTask(db, run.id, "verify_noop", "verifier", config);
     finishTask(db, root, run.id, "verify_noop", verifier.leaseToken, {
-      Status: "COMPLETED", Files: [], Summary: "Verified.", EvidenceRefs: ["package.json"]
+      Status: "COMPLETED", Files: [], Summary: "Verified.", EvidenceRefs: ["package.json"],
+      AcceptanceResults: [{
+        criterion: "done",
+        status: "passed",
+        EvidenceRefs: [{ type: "source", path: "package.json", startLine: 1, endLine: 1 }]
+      }]
     }, config);
     registerCheck(db, run.id, { name: "package-json", command: nodeCommand(["-e", "JSON.parse(require('fs').readFileSync('package.json'))"]), required: true });
     assert.equal(runChecks(db, root, run.id, config)[0].status, "passed");

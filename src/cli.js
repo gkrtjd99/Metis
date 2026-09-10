@@ -3,7 +3,7 @@ import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync, 
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ensureConfig, loadConfig } from "./core/config.js";
-import { openDatabase } from "./core/db.js";
+import { openDatabase, transaction } from "./core/db.js";
 import { MetisError, invariant } from "./core/errors.js";
 import {
   activeRun,
@@ -103,7 +103,7 @@ import { listJournal, replayJournal } from "./core/journal.js";
 import { evaluateRun, latestEvaluation } from "./core/evaluation.js";
 import { createVerificationCandidate, getVerificationCandidate } from "./core/verification.js";
 import { assertController, controllerStatus, heartbeatController, takeoverController } from "./core/ownership.js";
-import { addCheckpoint, checkpointStatus, getCheckpoint, listCheckpoints, resolveCheckpoint } from "./core/checkpoints.js";
+import { addCheckpoint, approvePlannedExecution, checkpointStatus, getCheckpoint, listCheckpoints, resolveCheckpoint } from "./core/checkpoints.js";
 import { browserStatus, getBrowserScenario, listBrowserScenarios, registerBrowserScenario, runBrowserScenario } from "./core/browser.js";
 import { capabilityExplanation, listCapabilities } from "./core/capabilities.js";
 import { addInterfaceContract, freezeInterfaceContract, getInterfaceContract, listInterfaceContracts } from "./core/interfaces.js";
@@ -113,17 +113,31 @@ import { configureModels, modelConfigView, resetModels } from "./core/model-conf
 import { assertSupportedNodeVersion } from "./runtime/node-version.js";
 import { abortOwnerBatch, acknowledgeOwnerSpawn, claimOwnerSchedule, heartbeatOwner, ownerBatchStatus, ownerChildFailure, ownerNext } from "./core/owner.js";
 import { ownerRelayRequests, readOwnerRelayBatch } from "./core/owner-relay.js";
+import { bindContinuation, detachContinuation, inspectContinuation } from "./core/continuation.js";
+import { parseSkillEntry } from "./core/skill-entry.js";
+import { restoreGoalContext } from "./core/goal-recovery.js";
+import { createGoalPrd } from "./core/goal-documents.js";
 
 const HELP = `Metis CLI
 
-Managed host entrypoint:
-  /goal $metis "<objective>"
+Host entrypoints:
+  $metis "<objective>"  (opt-in continuation preview; native goal inactive)
+  $metis prd "<idea>"  (목표 문서 작성만; 구현하지 않음)
+  $metis plan "<objective>" | @<document>  (계획만; 명시적인 run 필요)
+  $metis run | resume | status  (기존 목표 실행·복원·상태)
+  $metis:model  (기존 모델 설정 스킬)
+  /goal $metis "<objective>"  (legacy native-goal mode; do not bind continuation)
+  metis entry resolve --input '<text after $metis>'  (문법만 해석; 실행하지 않음)
 
 Install and controller ownership:
   metis init [--host codex|claude|opencode|all] [--force]
   metis attach [--host codex|claude|opencode|all]
   metis lifecycle
-  metis start <goal> [--host codex] [--approval autonomous-local]
+  metis continuation install|uninstall --host claude|codex
+  metis continuation inspect --host claude|codex --session-id <native-session-id>
+  metis continuation bind --host claude|codex --session-id <native-session-id> --native-goal-inactive --evidence <confirmation> [--rebind]
+  metis continuation detach --host claude|codex --session-id <native-session-id>
+  metis start <goal> [--host codex] [--approval autonomous-local] [--plan-only]
   metis controller status
   metis controller heartbeat
   metis controller takeover [--force --yes]
@@ -140,6 +154,9 @@ Install and controller ownership:
   metis resume
 
 Goal contract and traceability:
+  metis goal prd --title <title> --file <markdown>  (안전한 목표 폴더·PRD 생성; run 생성 없음)
+  metis goal restore [--tokens N]  (목표·출처·문서 경로·계획·진행 복원; controller 인증 필요)
+  metis plan execute --reason <explicit-run-request>  (현재 계획 실행 승인만; spawn하지 않음)
   metis contract freeze [--file file | --data json | stdin]
   metis contract get
   metis contract amend [--file file | --data json | stdin]
@@ -170,13 +187,13 @@ Planning and orchestration:
   metis model reset --yes
   metis milestone add|list|get ...
   metis design lint|seal|review ...
-  metis plan lint|seal|review|ingest ...
+  metis plan lint|seal|review|ingest ...  (seal은 --data/--file 실행 설정 승인 입력을 선택적으로 받음)
   metis interface add|get|list|freeze ...
   metis task packet compile|get|status|list ...
   metis capability list
   metis capability explain <task-id>
   metis schedule propose [--limit N] [--parent-task id]
-  metis schedule claim [--owner name] [--limit N] [--parent-task id]
+  metis schedule claim [--owner name] [--limit N] [--parent-task id] [--require-exact-effort]
   metis schedule ack <batch-id> --receipts '{"task-id":{"receipt":"host-child-receipt","batchId":"batch-id","taskId":"task-id","attemptFence":1}}' [--tasks id1,id2] [--owner name]
   metis schedule heartbeat <batch-id>
   metis schedule abort <batch-id> <reason>
@@ -410,8 +427,8 @@ function contextOptions(flags, config) {
 }
 
 const CONTROLLER_MUTATIONS = new Set([
-  "drive", "advance", "reopen", "block", "pause", "resume",
-  "controller materialize",
+  "drive", "next", "advance", "reopen", "block", "pause", "resume",
+  "controller materialize", "plan execute",
   "contract freeze", "contract amend",
   "requirement status", "requirement link",
   "assumption add", "assumption status", "invariant add", "invariant status", "risk add", "risk status",
@@ -508,6 +525,7 @@ async function dispatch(positionals, flags, context) {
   }
 
   if (top === "start") {
+    invariant(flags["plan-only"] === undefined || [true, false, "true", "false"].includes(flags["plan-only"]), "PLAN_ONLY_FLAG", "--plan-only는 boolean이어야 합니다.");
     const goal = positionals.slice(1).join(" ").trim() || String(await inputValue(flags, "") ?? "").trim();
     const supplied = controllerInput(flags);
     const result = startRun(db, projectRoot, config, goal, {
@@ -516,9 +534,24 @@ async function dispatch(positionals, flags, context) {
       controller: supplied,
       controllerSessionId: flags["controller-session"] ?? process.env.METIS_CONTROLLER_SESSION,
       controllerOwner: flags["controller-owner"] ?? process.env.METIS_CONTROLLER_OWNER,
-      takeover: toBoolean(flags.takeover)
+      takeover: toBoolean(flags.takeover),
+      planOnly: toBoolean(flags["plan-only"])
     });
     return { ...result, context: buildMainContext(db, projectRoot, result.run.id, config, contextOptions(flags, config)) };
+  }
+
+  if (key === "continuation bind" || key === "continuation detach") {
+    const run = resolveRun(db, flags);
+    const options = { host: flags.host, sessionId: flags["session-id"] };
+    if (key === "continuation bind") {
+      return bindContinuation(db, projectRoot, run.id, controllerInput(flags), {
+        ...options,
+        nativeGoalInactive: toBoolean(flags["native-goal-inactive"]),
+        rebind: toBoolean(flags.rebind),
+        evidence: flags.evidence
+      });
+    }
+    return detachContinuation(db, projectRoot, run.id, controllerInput(flags), options);
   }
 
   if (key === "controller status") return controllerStatus(db, resolveRun(db, flags).id);
@@ -539,6 +572,20 @@ async function dispatch(positionals, flags, context) {
   }
 
   context.controller = guardController(db, flags, config, positionals);
+
+  if (key === "goal restore") {
+    invariant(positionals.length === 2, "GOAL_RESTORE_ARGUMENTS", "goal restore에는 추가 인자를 사용할 수 없습니다.");
+    const run = resolveRun(db, flags);
+    assertController(db, run.id, controllerInput(flags), { heartbeat: false });
+    return restoreGoalContext(db, projectRoot, run.id, config, contextOptions(flags, config));
+  }
+
+  if (key === "plan execute") {
+    invariant(positionals.length === 2 && typeof flags.reason === "string" && flags.reason.trim(), "PLAN_EXECUTION_REASON", "현재 계획의 명시적인 실행 요청을 --reason에 기록하세요.");
+    return approvePlannedExecution(db, projectRoot, resolveRun(db, flags).id, {
+      controller: controllerInput(flags), resolution: flags.reason, resolvedBy: "metis-main"
+    });
+  }
 
   if (top === "relay") {
     const run = resolveRun(db, flags);
@@ -592,8 +639,15 @@ async function dispatch(positionals, flags, context) {
 
   if (top === "drive") {
     const run = resolveRun(db, flags);
+    const input = flags.file || flags.data
+      ? await inputJson(flags, {}, { containedRoot: projectRoot })
+      : {};
+    const executionSettings = flags.file || flags.data
+      ? (input.executionSettings === undefined ? input : input.executionSettings)
+      : undefined;
     return driveController(db, projectRoot, run.id, context.controller, config, {
-      maxIterations: integer(flags["max-iterations"], undefined)
+      maxIterations: integer(flags["max-iterations"], undefined),
+      ...(executionSettings === undefined ? {} : { executionSettings })
     });
   }
 
@@ -792,23 +846,26 @@ async function dispatch(positionals, flags, context) {
 
   if (key === "plan seal") {
     const run = resolveRun(db, flags);
-    const sealed = sealPlan(db, run.id, config);
-    const draftBinding = currentPlanDraftBinding(db, projectRoot, run.id);
-    const artifact = putArtifact(db, projectRoot, run.id, "plan", sealed.content, {
-      status: "verified",
-      metadata: {
-        planHash: sealed.planHash,
-        version: sealed.content.version,
-        ...(draftBinding ? {
-          planDraftArtifactId: draftBinding.draftArtifactId,
-          planDraftIngestedArtifactId: draftBinding.receiptArtifactId,
-          planDraftContentRef: draftBinding.draftContentRef,
-          plannedGraphFingerprint: draftBinding.plannedGraphFingerprint,
-          plannerTaskId: draftBinding.plannerTaskId
-        } : {})
-      }
+    const settings = flags.file || flags.data ? await inputJson(flags, {}, { containedRoot: projectRoot }) : {};
+    return transaction(db, () => {
+      const sealed = sealPlan(db, run.id, config, settings);
+      const draftBinding = currentPlanDraftBinding(db, projectRoot, run.id);
+      const artifact = putArtifact(db, projectRoot, run.id, "plan", sealed.content, {
+        status: "verified",
+        metadata: {
+          planHash: sealed.planHash,
+          version: sealed.content.version,
+          ...(draftBinding ? {
+            planDraftArtifactId: draftBinding.draftArtifactId,
+            planDraftIngestedArtifactId: draftBinding.receiptArtifactId,
+            planDraftContentRef: draftBinding.draftContentRef,
+            plannedGraphFingerprint: draftBinding.plannedGraphFingerprint,
+            plannerTaskId: draftBinding.plannerTaskId
+          } : {})
+        }
+      });
+      return { graph: sealed.graph, milestoneGraph: sealed.milestoneGraph, milestones: sealed.milestones, tasks: sealed.tasks, planHash: sealed.planHash, artifactId: artifact.id };
     });
-    return { graph: sealed.graph, milestoneGraph: sealed.milestoneGraph, milestones: sealed.milestones, tasks: sealed.tasks, planHash: sealed.planHash, artifactId: artifact.id };
   }
 
   if (key === "plan ingest") {
@@ -832,6 +889,7 @@ async function dispatch(positionals, flags, context) {
       owner: flags.owner ?? context.controller?.owner ?? "metis-main",
       limit: integer(flags.limit, null),
       parentTaskId: flags["parent-task"] ?? null,
+      requireExactEffort: toBoolean(flags["require-exact-effort"]),
       controllerFencingToken: context.controller?.fencingToken
     });
   }
@@ -1075,6 +1133,20 @@ export async function main(argv = process.argv.slice(2), io = process) {
     emit(HELP, flags, io);
     return 0;
   }
+  if (positionals[0] === "entry") {
+    try {
+      invariant(positionals.length === 2 && positionals[1] === "resolve", "ENTRY_COMMAND", "entry resolve만 지원합니다.");
+      invariant(Object.keys(flags).every((key) => ["input", "pretty", "quiet", "root"].includes(key)), "ENTRY_FLAGS", "지원되지 않는 entry 옵션입니다.");
+      invariant(typeof flags.input === "string", "ENTRY_INPUT_REQUIRED", "--input에 $metis 이후의 원문을 전달하세요.");
+      emit(parseSkillEntry(flags.input), flags, io);
+      return 0;
+    } catch (error) {
+      const normalized = normalizeError(error);
+      io.stderr.write(`${stableStringify({ error: { code: normalized.code, message: normalized.message } })}\n`);
+      return normalized.code === "INTERNAL_ERROR" ? 2 : 1;
+    }
+  }
+
   if (positionals[0] === "init") {
     try {
       const host = String(flags.host ?? "codex").split(",").map((item) => item.trim()).filter(Boolean);
@@ -1109,6 +1181,44 @@ export async function main(argv = process.argv.slice(2), io = process) {
     const normalized = normalizeError(error);
     emit({ error: { code: normalized.code, message: normalized.message, details: normalized.details } }, flags, io);
     return normalized.code === "INTERNAL_ERROR" ? 2 : 1;
+  }
+
+  if (positionals[0] === "goal" && positionals[1] === "prd") {
+    try {
+      invariant(positionals.length === 2 && Object.keys(flags).every((key) => ["title", "file", "root", "pretty", "quiet"].includes(key)),
+        "GOAL_PRD_ARGUMENTS", "goal prd는 --title, --file 및 출력/root 옵션만 지원합니다.");
+      invariant(typeof flags.file === "string" && flags.file.trim(), "GOAL_PRD_FILE", "검토한 Markdown 본문 파일을 --file로 지정하세요.");
+      emit(createGoalPrd(projectRoot, flags.title, await inputValue(flags)), flags, io);
+      return 0;
+    } catch (error) {
+      const normalized = normalizeError(error);
+      io.stderr.write(`${stableStringify({ error: { code: normalized.code, message: normalized.message } })}\n`);
+      return normalized.code === "INTERNAL_ERROR" ? 2 : 1;
+    }
+  }
+
+  if (positionals[0] === "continuation" && !["bind", "detach"].includes(positionals[1])) {
+    try {
+      const operation = positionals[1];
+      const options = { host: flags.host, sessionId: flags["session-id"] };
+      let result;
+      if (operation === "inspect") {
+        result = inspectContinuation(projectRoot, options);
+      } else if (operation === "install" || operation === "uninstall") {
+        const { installContinuationHooks, uninstallContinuationHooks } = await import("./adapters/continuation-install.js");
+        result = operation === "install"
+          ? installContinuationHooks(projectRoot, { host: flags.host, force: toBoolean(flags.force) })
+          : uninstallContinuationHooks(projectRoot, { host: flags.host });
+      } else {
+        throw new MetisError("CONTINUATION_COMMAND", "지원되지 않는 continuation 명령입니다.");
+      }
+      emit(result, flags, io);
+      return result.conflicts?.length ? 1 : 0;
+    } catch (error) {
+      const normalized = normalizeError(error);
+      io.stderr.write(`${stableStringify({ error: { code: normalized.code, message: normalized.message } })}\n`);
+      return normalized.code === "INTERNAL_ERROR" ? 2 : 1;
+    }
   }
 
   if (positionals[0] === "reset") {

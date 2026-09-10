@@ -33,6 +33,10 @@ function assertInstalledSkillTree(root, relative) {
     .map((file) => path.relative(root, file))
     .sort();
   assert.deepEqual(discoverable, [`${relative}/SKILL.md`]);
+  assert.match(readFileSync(path.join(skillRoot, "references/prd.md"), "utf8"), /goal prd --title/);
+  assert.match(readFileSync(path.join(skillRoot, "references/recovery.md"), "utf8"), /documents\.status: bound/);
+  assert.match(readFileSync(path.join(skillRoot, "templates/plan.md"), "utf8"), /documents\.plan/);
+  assert.match(readFileSync(path.join(skillRoot, "templates/decision.md"), "utf8"), /documents\.decisions/);
 
   const capabilities = filesBelow(skillRoot)
     .filter((file) => path.basename(file) === "CAPABILITY.md")

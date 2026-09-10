@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { resolveModelCapabilities } from "../src/adapters/model-capabilities.js";
-import { claudeSpawnDescriptor, codexSpawnDescriptor } from "../src/adapters/spawn-descriptors.js";
+import { claudeSpawnDescriptor, codexSpawnDescriptor, renderSpawnDescriptor } from "../src/adapters/spawn-descriptors.js";
 
 const task = {
   id: "T-1", role: "worker", selected_model: "gpt-5.6", requested_effort: "max", effective_effort: "max",
@@ -39,6 +39,13 @@ test("unknown capability fails closed", () => {
   assert.equal(result.effective, null);
   assert.equal(result.source, "unknown");
   assert.deepEqual(result.supported, []);
+});
+
+test("descriptor consumes direct supported-effort evidence", () => {
+  const descriptor = codexSpawnDescriptor(task, contract, { supportedEfforts: ["low", "medium", "high"] });
+  assert.equal(descriptor.reasoning_effort, "high");
+  assert.equal(descriptor.effort_status, "unsupported");
+  assert.equal(descriptor.effective_effort, "high");
 });
 
 test("host-wide evidence does not make an unknown model look supported", () => {
@@ -129,12 +136,12 @@ test("terminal handoff quotes hostile task and lease values before shell renderi
 
 test("Claude renders --effort and only enables minimal startup flags with explicit inputs", () => {
   const plain = claudeSpawnDescriptor(task, contract);
-  assert.deepEqual(plain.args, ["--effort", "max"]);
+  assert.deepEqual(plain.args, ["--model", "gpt-5.6", "--effort", "max"]);
   const explicit = claudeSpawnDescriptor(task, contract, {
     startup: { requiredInputs: [], tools: [], permissions: [], cwd: "/repo" }
   });
   assert.deepEqual(explicit.args, [
-    "--effort", "max", "--bare", "--exclude-dynamic-system-prompt-sections", "--strict-mcp-config"
+    "--model", "gpt-5.6", "--effort", "max", "--bare", "--exclude-dynamic-system-prompt-sections", "--strict-mcp-config"
   ]);
 });
 
@@ -145,4 +152,72 @@ test("providers defer an effort that was not negotiated", () => {
   assert.equal(descriptor.reasoning_effort, undefined);
   assert.equal(descriptor.effective_effort, undefined);
   assert.equal(descriptor.effort_deferred, true);
+  assert.equal(descriptor.effort_status, "unconfirmed");
+  assert.equal(descriptor.effort_delivery, "not-delivered");
+  assert.equal(descriptor.effort_confirmation, "unconfirmed");
+  assert.equal(descriptor.effort_launch_ready, false);
+});
+
+test("unsupported requested effort is labeled while delivering only the negotiated fallback", () => {
+  const descriptor = claudeSpawnDescriptor(task, contract, {
+    runtime: { model: task.selected_model, supportedEfforts: ["low", "medium", "high"] }
+  });
+  assert.deepEqual(descriptor.args, ["--model", "gpt-5.6", "--effort", "high"]);
+  assert.equal(descriptor.requested_effort, "max");
+  assert.equal(descriptor.effective_effort, "high");
+  assert.equal(descriptor.effort_status, "unsupported");
+  assert.equal(descriptor.effort_delivery, "cli-arg");
+  assert.equal(descriptor.effort_confirmation, "unconfirmed");
+});
+
+test("Claude CLI launch carries model and effort as explicit argv", () => {
+  const descriptor = claudeSpawnDescriptor(task, contract);
+  assert.deepEqual(descriptor.args, ["--model", "gpt-5.6", "--effort", "max"]);
+  assert.equal(descriptor.model, "gpt-5.6");
+});
+
+test("exact effort requests do not launch with an unsupported fallback", () => {
+  const descriptor = claudeSpawnDescriptor(task, contract, {
+    requireExactEffort: true,
+    runtime: { model: task.selected_model, supportedEfforts: ["low", "medium", "high"] }
+  });
+  assert.deepEqual(descriptor.args, ["--model", "gpt-5.6"]);
+  assert.equal(descriptor.effective_effort, undefined);
+  assert.equal(descriptor.effort_status, "unsupported");
+  assert.equal(descriptor.effort_launch_ready, false);
+  assert.equal(descriptor.effort_delivery, "not-delivered");
+});
+
+test("host rejection overrides capability evidence and prevents another effort flag", () => {
+  const descriptor = claudeSpawnDescriptor(task, contract, {
+    effortStatus: "REJECTED",
+    runtime: { model: task.selected_model, supportedEfforts: ["low", "medium", "high", "xhigh", "max"] }
+  });
+  assert.deepEqual(descriptor.args, ["--model", "gpt-5.6"]);
+  assert.equal(descriptor.effort_status, "rejected");
+  assert.equal(descriptor.effort_launch_ready, false);
+  assert.equal(descriptor.effort_confirmation, "unconfirmed");
+});
+
+test("generic hosts cannot claim strict effort delivery without an adapter surface", () => {
+  const descriptor = renderSpawnDescriptor("opencode", task, contract, {
+    requireExactEffort: true,
+    supportedEfforts: ["low", "medium", "high", "xhigh", "max"]
+  });
+  assert.equal(descriptor.effort_status, "negotiated");
+  assert.equal(descriptor.effort_launch_ready, false);
+  assert.equal(descriptor.effort_delivery, "not-delivered");
+});
+
+test("invalid or explicitly unconfirmed status fails closed despite runtime evidence", () => {
+  for (const effortStatus of ["garbage", "unconfirmed"]) {
+    const descriptor = claudeSpawnDescriptor(task, contract, {
+      effortStatus,
+      requireExactEffort: true,
+      runtime: { model: task.selected_model, supportedEfforts: ["low", "medium", "high", "xhigh", "max"] }
+    });
+    assert.equal(descriptor.effort_status, "unconfirmed");
+    assert.equal(descriptor.effort_launch_ready, false);
+    assert.deepEqual(descriptor.args, ["--model", "gpt-5.6"]);
+  }
 });

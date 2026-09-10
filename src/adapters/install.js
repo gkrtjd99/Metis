@@ -245,7 +245,7 @@ function installedSkillText(projectRoot, skillName = "metis") {
 
 function installSkill(projectRoot, targetRelative, hosts, options, manifest, skillName = "metis") {
   const results = [setManagedFile(projectRoot, path.posix.join(targetRelative, "SKILL.md"), installedSkillText(projectRoot, skillName), hosts, options, manifest)];
-  for (const directory of ["references", "agents", "capabilities"]) {
+  for (const directory of ["references", "agents", "capabilities", "templates"]) {
     results.push(...copyTree(projectRoot, path.join(packageRoot, "skills", skillName, directory), path.posix.join(targetRelative, directory), hosts, options, manifest));
   }
   return results;
@@ -602,6 +602,36 @@ export function uninstallAdapters(projectRoot, hosts = ["all"], options = {}) {
   };
   const manifest = readManifest(projectRoot);
   invariant(manifest, "INSTALL_MANIFEST_MISSING", "Metis install manifest is missing. Refusing to guess which files are safe to remove.");
+  const requested = hosts.includes("all") ? [...manifest.hosts] : [...new Set(hosts)];
+  for (const host of requested) invariant(["codex", "claude", "opencode"].includes(host), "HOST_INVALID", `Unsupported host: ${host}.`);
+  const continuationRecords = manifest.continuationHooks && typeof manifest.continuationHooks === "object"
+    ? manifest.continuationHooks
+    : {};
+  const continuationConflicts = requested
+    .filter((host) => Object.hasOwn(continuationRecords, host))
+    .map((host) => ({
+      path: continuationRecords[host]?.path ?? (host === "claude" ? ".claude/settings.json" : ".codex/hooks.json"),
+      host,
+      reason: "uninstall continuation hooks explicitly before removing the host adapter"
+    }));
+  if (continuationConflicts.length > 0) {
+    return {
+      requested,
+      removedHosts: [],
+      remainingHosts: [...manifest.hosts],
+      dryRun: Boolean(effectiveOptions.dryRun),
+      applied: false,
+      forceModified: Boolean(effectiveOptions.forceModified),
+      backupModified: Boolean(effectiveOptions.backupModified),
+      uninstallId: effectiveOptions.uninstallId,
+      files: [],
+      backups: [],
+      conflicts: continuationConflicts,
+      marketplace: { status: "not-requested" },
+      ignoreRemoved: [],
+      statePreserved: existsSync(path.join(projectRoot, ".metis"))
+    };
+  }
   if (!effectiveOptions.dryRun && effectiveOptions.preflight) {
     const preview = uninstallAdapters(projectRoot, hosts, {
       ...effectiveOptions,
@@ -612,8 +642,6 @@ export function uninstallAdapters(projectRoot, hosts = ["all"], options = {}) {
   }
   options = effectiveOptions;
   if (options.backupModified && !options.dryRun) ensureRuntimeLayout(projectRoot);
-  const requested = hosts.includes("all") ? [...manifest.hosts] : [...new Set(hosts)];
-  for (const host of requested) invariant(["codex", "claude", "opencode"].includes(host), "HOST_INVALID", `Unsupported host: ${host}.`);
   const desiredRemaining = manifest.hosts.filter((host) => !requested.includes(host));
   const removeCommon = desiredRemaining.length === 0;
   const fileResults = [];
@@ -660,7 +688,10 @@ export function uninstallAdapters(projectRoot, hosts = ["all"], options = {}) {
     manifest.files = retainedRecords;
     manifest.hosts = effectiveRemaining;
     if (!effectiveRemaining.includes("codex") && marketplace.status !== "conflict") manifest.marketplace = null;
-    if (manifest.hosts.length > 0 || failedHosts.size > 0) writeManifest(projectRoot, manifest);
+    const continuationRemaining = manifest.continuationHooks
+      && typeof manifest.continuationHooks === "object"
+      && Object.keys(manifest.continuationHooks).length > 0;
+    if (manifest.hosts.length > 0 || failedHosts.size > 0 || continuationRemaining) writeManifest(projectRoot, manifest);
     else {
       rmSync(manifestPath(projectRoot), { force: true });
       pruneEmptyParents(projectRoot, manifestPath(projectRoot));
@@ -687,6 +718,8 @@ export function uninstallAdapters(projectRoot, hosts = ["all"], options = {}) {
     statePreserved: existsSync(path.join(projectRoot, ".metis"))
   };
 }
+
+export { installContinuationHooks, uninstallContinuationHooks } from "./continuation-install.js";
 
 export function installationInventory(projectRoot) {
   const manifest = readManifest(projectRoot);
