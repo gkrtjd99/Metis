@@ -23,7 +23,7 @@ function fixture() {
   const { run } = startRun(db, root, config, originalGoal, { planOnly: true });
   const sourcePath = path.join(root, "request.txt");
   writeFileSync(sourcePath, sourceBody);
-  const source = putArtifact(db, root, run.id, "prd", sourceBody, { path: sourcePath, metadata: { controllerToken: "PRIVATE_METADATA" } });
+  const source = putArtifact(db, root, run.id, "prd", sourceBody, { path: sourcePath, metadata: { controllerToken: "metadata-here" } });
   const { contract } = freezeGoalContract(db, root, run.id, {
     objective: "현재 계약 목표", scope: ["src/local.js"], successCriteria: ["목표 복원이 가능하다"],
     complexity: "standard",
@@ -54,12 +54,12 @@ test("DB 재open 후 대화 없이 현재 계약·원래 목표·결정·작업�
     addDecision(db, f.run.id, { title: "내구성 결정", decision: "SNAPSHOT_DECISION", rationale: "원래 경로에 의존하지 않는다" });
     db.prepare("UPDATE runs SET phase = 'discover' WHERE id = ?").run(f.run.id);
     task(db, f.run.id, f.config, "recovery_task");
-    db.prepare("UPDATE tasks SET status = 'blocked', result_json = ? WHERE id = ?").run(JSON.stringify({ RawOutput: "RAW_WORKER_OUTPUT" }), "recovery_task");
+    db.prepare("UPDATE tasks SET status = 'blocked', result_json = ? WHERE id = ?").run(JSON.stringify({ RawOutput: "worker-here" }), "recovery_task");
     addCheckpoint(db, f.run.id, { id: "restore_pending", kind: "authority", reason: "사용자의 계획 실행 승인이 필요하다" });
     db.prepare(`INSERT INTO task_attempts(id, task_id, run_id, attempt_fence, attempt_number, host, role, tier, model_source, start_at)
       VALUES('restore_attempt', 'recovery_task', ?, 1, 1, 'test', 'scout', 'standard', 'test', datetime('now'))`).run(f.run.id);
-    recordEvent(db, f.run.id, "recovery.private", "info", { rawOutput: "PRIVATE_JOURNAL_PAYLOAD", controllerToken: "PRIVATE_CONTROLLER_EVENT" });
-    putArtifact(db, f.root, f.run.id, "discovery", { raw: "PRIVATE_PHASE_ARTIFACT" }, { metadata: { leaseToken: "PRIVATE_LEASE_METADATA" } });
+    recordEvent(db, f.run.id, "recovery.private", "info", { rawOutput: "journal-here", controllerToken: "controller-here" });
+    putArtifact(db, f.root, f.run.id, "discovery", { raw: "phase-here" }, { metadata: { leaseToken: "lease-here" } });
     unlinkSync(f.sourcePath);
     db.close();
     db = openDatabase(f.root);
@@ -82,7 +82,7 @@ test("DB 재open 후 대화 없이 현재 계약·원래 목표·결정·작업�
     assert.deepEqual(durableState(db), before);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM context_snapshots").get().n, 2);
     const serialized = JSON.stringify(restored);
-    for (const privateValue of [sourceBody.slice(0, 35), "RAW_WORKER_OUTPUT", "PRIVATE_JOURNAL_PAYLOAD", "PRIVATE_CONTROLLER_EVENT", "PRIVATE_METADATA", "PRIVATE_PHASE_ARTIFACT", "PRIVATE_LEASE_METADATA", f.run.controller_token]) {
+    for (const privateValue of [sourceBody.slice(0, 35), "worker-here", "journal-here", "controller-here", "metadata-here", "phase-here", "lease-here", f.run.controller_token]) {
       if (privateValue) assert.ok(!serialized.includes(privateValue), privateValue);
     }
     assert.doesNotMatch(serialized, /controller_token|lease_token|metadata_json|payload_json/);

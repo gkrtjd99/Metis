@@ -218,6 +218,9 @@ export function runChild(command, args, prompt, rawPath, options = {}) {
     }, timeoutMs);
     child.once("error", (error) => finish({ exitCode: null, signal: null, timedOut, forceKilled, error: "spawn-error" }));
     child.once("close", (exitCode, signal) => finish({ exitCode, signal, timedOut, forceKilled, error: null }));
+    // 짧게 종료하는 fake/provider가 bounded prompt 쓰기 전에 stdin을 닫을 수 있다.
+    // EPIPE를 소비해 플랫폼 차이로 수집된 receipt가 crash로 바뀌지 않게 한다.
+    child.stdin.on("error", () => {});
     child.stdin.end(prompt);
   });
 }

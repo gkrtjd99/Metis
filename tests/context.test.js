@@ -216,9 +216,9 @@ test("clipped coordinator contracts preserve bounded child slice boundaries with
     Interfaces: { Inputs: ["input-contract"], Outputs: ["output-contract"] },
     StopConditions: ["Stop if the frozen interface is missing."],
     ProgressSummary: "bounded progress",
-    ControllerCredentials: "controller-secret",
-    LeaseToken: "lease-secret",
-    RawResult: { secret: "raw-result-secret", huge: "x".repeat(500_000) }
+    ControllerCredentials: "controller-here",
+    LeaseToken: "lease-here",
+    RawResult: { secret: "raw-result-here", huge: "x".repeat(500_000) }
   });
   const contract = {
     RunId: "run",
@@ -249,7 +249,7 @@ test("clipped coordinator contracts preserve bounded child slice boundaries with
   assert.equal(parsed.ChildTasks[0].TargetPaths[0], "src/slice-a.js");
   assert.deepEqual(parsed.ChildTasks[1].DependsOn, ["worker-slice-a"]);
   const serialized = JSON.stringify(parsed);
-  assert.doesNotMatch(serialized, /controller-secret|lease-secret|raw-result-secret/u);
+  assert.doesNotMatch(serialized, /controller-here|lease-here|raw-result-here/u);
   assert.ok(serialized.length < 20_000, `child envelope was not bounded: ${serialized.length}`);
 });
 

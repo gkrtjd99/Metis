@@ -15,7 +15,7 @@ function boundRun(host = "claude") {
   project.db.exec("PRAGMA journal_mode = DELETE");
   const started = startTestRun(project.db, project.root, project.config, "Continuation regression", {
     host,
-    controllerSessionId: `${host}-controller`,
+    controllerSessionId: host + "-controller",
     controllerOwner: "metis-main"
   });
   bindContinuation(project.db, project.root, started.run.id, started.controller, {
@@ -77,7 +77,7 @@ test("running tasks with multiple resource leases remain waitable", () => {
       db.prepare(`
         INSERT INTO leases(resource, task_id, token, fencing_token, owner, expires_at, created_at)
         VALUES(?, ?, ?, 1, 'worker', ?, ?)
-      `).run(resource, "multi-resource-task", `lease-${resource}`, expiry, timestamp);
+      `).run(resource, "multi-resource-task", "lease-" + resource, expiry, timestamp);
     }
     db.prepare(`
       INSERT INTO scheduler_batches(
@@ -118,7 +118,7 @@ test("same-turn hook delivery is not suppressed when the core state advances", a
       runId: "run-1",
       bindingId: "binding-1",
       revision,
-      stateFingerprint: `state-${revision}`
+      stateFingerprint: "state-" + revision
     });
 
     const first = await processHookEvent(event, { host: "claude", inspect });
@@ -134,8 +134,8 @@ test("same-turn hook delivery is not suppressed when the core state advances", a
 test("read-only inspection does not create WAL sidecars when both are absent", () => {
   const { root, db, run } = boundRun();
   const database = databasePath(root);
-  const wal = `${database}-wal`;
-  const shm = `${database}-shm`;
+  const wal = database + "-wal";
+  const shm = database + "-shm";
   try {
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA wal_autocheckpoint = 0");
@@ -161,9 +161,9 @@ test("database sidecars fail closed without filesystem mutation", () => {
   for (const sidecars of [["wal"], ["shm"], ["wal", "shm"], ["journal"]]) {
     const { root, db, run } = boundRun();
     const database = databasePath(root);
-    const wal = `${database}-wal`;
-    const shm = `${database}-shm`;
-    const journal = `${database}-journal`;
+    const wal = database + "-wal";
+    const shm = database + "-shm";
+    const journal = database + "-journal";
     const sidecarPath = { wal, shm, journal };
     try {
       db.close();
