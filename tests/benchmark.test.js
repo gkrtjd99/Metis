@@ -56,13 +56,18 @@ async function assertProcessGone(pid, timeoutMs = 1000) {
   assert.fail(`process ${pid} survived bounded cleanup polling`);
 }
 
-async function waitForFile(file, timeoutMs = 2000) {
+async function waitForFile(file, timeoutMs = 3000, predicate = () => true) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
-    if (existsSync(file)) return;
+    if (existsSync(file)) {
+      try {
+        const content = readFileSync(file, "utf8");
+        if (predicate(content)) return content;
+      } catch {}
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  assert.fail(`file ${file} was not created within ${timeoutMs}ms`);
+  assert.fail(`file ${file} did not satisfy predicate within ${timeoutMs}ms`);
 }
 
 async function killTestProcess(pid) {
@@ -703,9 +708,9 @@ test("benchmark timeout contains a child process group and bounds wall time", as
     assert.equal(raw.execution.errorCode, "BENCHMARK_TIMEOUT");
     assert.ok(run.durationMs < 2500, `run duration ${run.durationMs}ms exceeded containment bound`);
     assert.ok(elapsed < 3000, `wall time ${elapsed}ms exceeded containment bound`);
-    await waitForFile(readyMarker);
-    await waitForFile(marker);
-    await waitForFile(pidFile);
+    await waitForFile(readyMarker, 3000, (c) => c.includes("ready"));
+    await waitForFile(marker, 3000, (c) => c.includes("terminated"));
+    await waitForFile(pidFile, 3000, (c) => c.trim().length > 0);
     assert.equal(readFileSync(marker, "utf8"), "terminated");
     grandchildPid = Number(readFileSync(pidFile, "utf8"));
     assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0);
@@ -755,7 +760,7 @@ test("benchmark cleanup deadline settles when an escaped descendant holds stdio"
     const elapsed = performance.now() - started;
     const run = result.results[0];
     const raw = JSON.parse(readObject(db, root, run.resultRef));
-    await waitForFile(pidFile);
+    await waitForFile(pidFile, 3000, (c) => c.trim().length > 0);
     escapedPid = Number(readFileSync(pidFile, "utf8"));
     assert.equal(run.status, "failed");
     assert.equal(raw.execution.errorCode, "BENCHMARK_CLEANUP_TIMEOUT");

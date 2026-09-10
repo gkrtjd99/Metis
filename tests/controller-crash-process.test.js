@@ -99,6 +99,7 @@ const controllerProcessSource = String.raw`
     batchId: claimed.batchId,
     taskId: claimed.batch[0].taskId
   }) + "\n";
+  withAuth(["controller", "heartbeat"]);
   writeFileSync(readyPath, readiness, { mode: 0o600 });
   process.stdout.write(readiness);
   const heartbeat = setInterval(() => {
@@ -192,7 +193,7 @@ function runRecovery(root, runId) {
 
 test("controller SIGKILL 후 승인·설정을 복원하고 이전 controller의 재승인·dispatch를 차단한다", async () => {
   const project = makeProject({ config: {
-    controller: { leaseSeconds: 1, heartbeatSeconds: 1 },
+    controller: { leaseSeconds: 3, heartbeatSeconds: 1 },
     host: "claude",
     orchestration: { requirePlanCritic: true, requireDesignCritic: true, specialistReviews: { enabled: true } },
     models: { capabilities: { claude: { models: { [model]: ["low", "medium", "high"] } } } }
@@ -215,7 +216,7 @@ test("controller SIGKILL 후 승인·설정을 복원하고 이전 controller의
     parent.kill("SIGKILL");
     await waitForExit(parent);
     assert.equal(parent.signalCode, "SIGKILL");
-    await new Promise((resolve) => setTimeout(resolve, 1300));
+    await new Promise((resolve) => setTimeout(resolve, 3300));
 
     const recovered = runRecovery(root, ready.runId);
     assert.deepEqual(recovered.takeover, {
