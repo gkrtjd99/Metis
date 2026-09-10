@@ -2,7 +2,6 @@
 name: metis-scout
 description: Perform bounded read-only repository discovery with typed evidence.
 tools: Read, Grep, Glob, Bash
-model: haiku
 ---
 
 You are a Metis scout agent.

@@ -40,7 +40,7 @@ function assertMirror(canonical, mirrors) {
   for (const mirror of mirrors) assert.equal(read(mirror), content, `${mirror} differs from ${canonical}`);
 }
 
-assert.equal(version, "1.1.0");
+assert.equal(version, "1.2.0");
 assert.equal(packageJson.engines.node, ">=22.16.0");
 assert.deepEqual(packageJson.exports, {
   ".": "./src/index.js",
@@ -113,7 +113,8 @@ assert.match(skill, /journal replay/);
 assert.ok(skill.split(/\r?\n/u).length <= 500, "SKILL.md must stay below 500 lines.");
 
 const agentMetadata = read("skills/metis/agents/openai.yaml");
-assert.match(agentMetadata, /default_prompt: ".*\/goal \$metis/);
+assert.match(agentMetadata, /default_prompt: ["'].*\/goal \$metis/);
+assert.match(agentMetadata, /\$metis plan/);
 assert.match(agentMetadata, /allow_implicit_invocation:\s*false/);
 
 const referenceDir = absolute("skills/metis/references");
@@ -123,8 +124,11 @@ assert.deepEqual(referenceFiles, [
   "contracts.md",
   "curation.md",
   "delegation.md",
+  "entrypoints.md",
   "lifecycle.md",
   "operations.md",
+  "planning.md",
+  "prd.md",
   "recovery.md",
   "token-policy.md"
 ]);
@@ -136,6 +140,30 @@ for (const file of referenceFiles) {
   assertMirror(`skills/metis/references/${file}`, [
     `adapters/claude/skills/metis/references/${file}`,
     `adapters/opencode/.opencode/skills/metis/references/${file}`
+  ]);
+}
+
+assert.match(skill, /entry resolve/);
+assert.match(skill, /goal restore/);
+assert.match(skill, /--plan-only/);
+assert.match(read("skills/metis/references/planning.md"), /plan execute/);
+assert.match(skill, /goal prd --title/);
+assert.match(skill, /goal restore.*documents/su);
+for (const file of ["prd.md", "planning.md", "recovery.md"]) {
+  assert.match(read(`skills/metis/references/${file}`), /documents/);
+  assert.match(read(`skills/metis/references/${file}`), /unbound/);
+}
+assert.match(read("skills/metis/references/prd.md"), /SHA-256/);
+assert.match(read("skills/metis/references/prd.md"), /symlink/);
+assert.match(read("skills/metis/templates/plan.md"), /documents\.plan/);
+assert.match(read("skills/metis/templates/decision.md"), /documents\.decisions/);
+assert.match(read("commands/metis.md"), /goal prd --title/);
+const templates = readdirSync(absolute("skills/metis/templates")).sort();
+assert.deepEqual(templates, ["decision.md", "plan.md", "prd.md"]);
+for (const file of templates) {
+  assertMirror(`skills/metis/templates/${file}`, [
+    `adapters/claude/skills/metis/templates/${file}`,
+    `adapters/opencode/.opencode/skills/metis/templates/${file}`
   ]);
 }
 
@@ -241,7 +269,7 @@ assert.match(generated, /metis clean --scope cache --dry-run --pretty/);
 assert.match(generated, /metis schedule ack/);
 
 const readme = read("README.md");
-assert.match(readme, /^# Metis 1\.1\.0/m);
+assert.match(readme, new RegExp(`^# Metis ${version.replaceAll(".", "\\.")}`, "m"));
 assert.match(readme, /current public release/i);
 assert.match(readme, /## Quick start/i);
 assert.match(readme, /Codex/i);
@@ -257,7 +285,7 @@ assert.match(readme, /metis clean --scope cache --dry-run/);
 assert.match(readme, /\.metis\/state\/state\.db/);
 
 const korean = read("docs/README.ko.md");
-assert.match(korean, /Metis 1\.1\.0/);
+assert.match(korean, new RegExp(`Metis ${version.replaceAll(".", "\\.")}`));
 assert.match(korean, /현재 public release/i);
 assert.match(korean, /## 빠른 시작/i);
 assert.match(korean, /Codex, Claude Code, OpenCode/i);
@@ -317,4 +345,4 @@ for (const file of filesBelow(root).filter((item) => /\.(?:js|mjs)$/u.test(item)
   execFileSync(process.execPath, ["--check", file], { stdio: "pipe" });
 }
 
-console.log("Metis 1.1.0 package structure is valid.");
+console.log("Metis 1.2.0 package structure is valid.");

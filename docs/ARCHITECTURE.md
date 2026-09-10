@@ -1,6 +1,6 @@
 # Architecture
 
-Metis 1.1.0, the current public release, retains schema version 11,
+Metis 1.2.0, the current public release, retains schema version 11,
 configuration version 6, and runtime layout version 4. No migration is required.
 The native execution-stage evidence boundary and local verification results are
 recorded in `VERIFICATION.md`.
@@ -56,6 +56,99 @@ The route is `no-run`, `active-live-controller`, `active-expired-controller`,
 `paused`, or `completed`. An expired controller can be replaced only through an
 explicit, authorized takeover after the previous controller is no longer
 active; fencing prevents stale controller writes.
+
+## State-driven continuation boundary
+
+Continuation is a host delivery boundary, not a second orchestrator or goal
+evaluator. The existing `/goal $metis` path remains the legacy native-evaluator
+path. Standalone `$metis` continuation is an opt-in preview and has no full-goal
+native E2E support claim.
+
+The supported flow is explicit:
+
+```text
+install hook (manual)
+  -> inspect actual host session (read-only)
+  -> bind session + active run (controller credentials required)
+  -> deterministic Stop projection
+  -> existing Main next/action path
+  -> detach explicitly
+```
+
+Only Claude and Codex have continuation hook surfaces. Binding requires the
+actual native session ID, an explicit `native-goal-inactive` confirmation, and
+non-empty operator evidence. The hook cannot detect or clear native-goal state,
+Claude `SessionStart`/`StopFailure`/`SessionEnd` and Codex `SessionStart` events
+may report lifecycle context, but only the actual host-provided session identity
+is accepted; the hook must never invent one. A foreign, stale, or missing
+binding fails closed.
+
+`metis continuation inspect` opens only pre-existing runtime files and the
+SQLite database read-only. It does not initialize layout/configuration, sample
+progress, renew leases, claim/spawn/ack work, advance phases, or write delivery
+state. Binding and detaching are authenticated controller mutations. Delivery
+deduplication files are bookkeeping only and are not a second runtime source of
+truth; an explicit same-controller/session `--rebind` resets that bookkeeping.
+
+The hook maps only the runtime projection:
+
+- `CONTINUE` asks the existing Main path to perform its returned action.
+- `WAIT` is safe only when the host event contains visible background evidence;
+  otherwise the host is paused instead of being polled or awakened.
+- `PAUSE` covers blockers, stale leases, unreadable state, and bounded
+  no-progress/cap conditions.
+- `COMPLETE` requires durable runtime completion, not a model message, hook exit,
+  or passing test alone.
+- `DETACHED` leaves ordinary host behavior unchanged.
+
+The hook is deterministic and evaluator-free. It never renews leases
+automatically, and bounded host block/no-progress limits mean that unlimited
+unattended execution is not guaranteed. Runtime completion and lifecycle gates
+remain authoritative.
+
+## Durable skill workflow boundary
+
+The durable skill workflow is a separate document-backed route, not a replacement
+for native `/goal $metis`:
+
+```text
+$metis prd "idea" -> $metis plan @path -> $metis run
+```
+
+The PRD stage records the short interview and document only. A plan-only start
+sets `Goal Contract.route.executionApprovalRequired` to `true` and stops at the
+existing sealed-plan/review authority checkpoint. Only an explicit CLI approval
+(`plan execute --reason ...`) records the current approval before execution.
+`resume` is continuation of the same run, not approval, takeover, or native
+session rebind; empty input and `status` preserve the current run context.
+Existing `$metis:model` routing is unaffected.
+
+The PRD snapshot is put through the existing artifact path. The route stores
+`sourceDocument: { artifactId, contentRef }` and treats the stored snapshot as
+immutable, not the original disk file. `goal restore` is a bounded, recorded mutation that restores handles
+for the current contract, plan, decisions, and runtime state. It records
+context/object/token references, never raw PRD or worker output or credentials,
+and validates same-run source identity and tamper state. It does not reopen the
+original source document and is not read-only.
+
+Goal folders reuse the existing PRD artifact `path`; there is no new schema,
+index, or sourceDocument field. `goal prd --title ... --file ...` runs before
+runtime bootstrap and exclusively creates `docs/metis/<goal-slug>/prd.md`.
+The slug is a bounded ASCII stem plus a normalized-title hash; any occupied
+folder fails closed. `goal restore.documents` derives PRD/plan/decisions paths
+only from the authenticated current-run source artifact. Bound artifact paths
+cannot be rewritten in place; moving requires a new snapshot and contract amend.
+Path inspection rejects descendant symlinks/hardlinks/type conflicts, permits
+missing files, and never rereads PRD content. Legacy/external or absent sources
+return `unbound`, not an inferred folder. Restore creates no goal documents.
+`plan.md` and `decisions.md` are host-maintained derived Markdown, not automatic
+exports or independent authorities. Runtime records remain authoritative; host
+edits must repeat safety checks. The CLI is not a concurrent filesystem sandbox.
+
+This route does not combine with native `/goal` or automatically clear native
+state. Host syntax and complete full-goal E2E remain unverified. OpenCode skill
+delivery and OpenCode continuation-hook support are separate capabilities; one
+does not imply the other. Continuation preview limits remain in force.
 
 ## Responsibility split
 
@@ -150,13 +243,13 @@ the same persisted actions as Main, with a bounded iteration limit for
 automation and tests. It never bypasses task, lease, budget, review, or
 integration fencing.
 
-For an eligible `fast` run, the controller validates and compiles the complete
-canonical graph in one fenced transaction and records a deterministic approval
-bound to the exact sealed plan and packet set. It does not spawn a semantic
-plan critic for controller-authored canonical records. After implementation,
-the independent integration reviewer and verifier consume the same immutable
-repository candidate in parallel. The verification candidate, adversarial
-completion review, and curation remain later gated steps.
+새로 materialize하는 eligible `fast` v2는 별도 task 분해나 owner 하위 트리 없이
+worker와 독립 verifier를 바로 준비한다. 내부의 두 실행 기록과 canonical seal은
+receipt·lease·attempt·복원을 위해 유지한다. Verifier는 worker와 다른 실제 host
+receipt로 현재 immutable 통합 후보를 검증한다. 통합·완료 승인은 이 독립 검증의
+파생 기록이며 별도 integration/adversarial reviewer가 실행됐다고 표시하지 않는다.
+지식 기록은 검증된 최종 증거에서 deterministic하게 생성한다. 기존 fast v1의
+5역할 실행은 기존 seal에 따라 복원하고, balanced/full의 검토 게이트는 유지한다.
 
 Discovery and current external research may be fused into one read-only
 general atomic materialization wave. The wave writes stable task identities and
@@ -219,7 +312,7 @@ The runtime invalidates downstream state.
 
 ## Universal task graph
 
-Metis 1.1.0 retains tasks for the complete lifecycle.
+Metis 1.2.0 retains tasks for the complete lifecycle.
 Implementation is not a special scheduling system.
 
 Task kinds:
@@ -669,6 +762,6 @@ Runtime layout:
 
 ## Version boundary
 
-The 1.1.0 release retains rejection of incompatible schema and configuration
+The 1.2.0 release retains rejection of incompatible schema and configuration
 versions. New projects create runtime state with the canonical versions above;
 no schema, configuration, or layout migration is needed.

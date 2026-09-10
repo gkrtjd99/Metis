@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import { addTask, claimTask, finishTask, sealPlan } from "../src/core/tasks.js";
 import { advancePhase, gateReport, latestArtifact, putArtifact, startRun } from "../src/core/state.js";
@@ -9,8 +11,8 @@ import { main } from "../src/cli.js";
 import { jsonIo, makeProject, startTestRun, forcePhase } from "./helpers.js";
 import { addMilestone } from "../src/core/milestones.js";
 
-function enterPlan(db, root, config) {
-  const { run } = startTestRun(db, root, config, "Implement a bounded feature");
+function enterPlan(db, root, config, options = {}) {
+  const { run } = startTestRun(db, root, config, "Implement a bounded feature", options);
   putArtifact(db, root, run.id, "discovery", {
     objective: "Implement a bounded feature",
     scope: ["src/feature.js"],
@@ -113,6 +115,100 @@ function addParallelWorkers(db, runId, config, options = {}) {
       dependsOn: options.dependsOn?.[index] ?? []
     }, config);
   }
+}
+
+function addVerifierCoverageGraph(db, runId, config, options = {}) {
+  const milestoneId = options.milestoneId ?? "m-coverage";
+  addMilestone(db, runId, {
+    id: milestoneId,
+    title: "Deliver bounded coverage slice",
+    objective: "The named implementation slice is independently verified.",
+    userVisibleOutcome: "The bounded behavior is delivered with independent evidence.",
+    exitCriteria: ["REQ-001 is implemented and verified."],
+    requirementIds: ["REQ-001"]
+  });
+  const parentIds = [...new Set([options.workerParentTaskId, options.verifierParentTaskId].filter(Boolean))];
+  for (const parentId of parentIds) {
+    addTask(db, runId, {
+      id: parentId,
+      title: `Coordinate ${parentId}`,
+      goal: `Coordinate the bounded child slices owned by ${parentId}.`,
+      role: "coordinator",
+      taskKind: "integration",
+      runPhase: "execute",
+      milestoneId,
+      readOnly: true,
+      targetPaths: [],
+      scope: [`Coordinate the ${parentId} subtree.`],
+      nonGoals: ["Do not implement child slices."],
+      constraints: ["Preserve each child boundary and receipt."],
+      acceptanceCriteria: ["The child subtree remains bounded."],
+      requiredEvidence: ["Current child task state"],
+      verificationModes: ["coordination"],
+      requirementIds: ["REQ-001"]
+    }, config);
+  }
+  const workerId = options.workerId ?? "coverage-worker";
+  const worker = addTask(db, runId, {
+    id: workerId,
+    title: "Implement the bounded value path",
+    goal: "Implement the bounded value path in its exclusive source file.",
+    role: "worker",
+    runPhase: "execute",
+    milestoneId,
+    parentTaskId: options.workerParentTaskId ?? null,
+    readOnly: false,
+    targetPaths: ["src/coverage-worker.js"],
+    scope: ["Implement the value conversion in src/coverage-worker.js."],
+    nonGoals: ["Do not modify verifier or unrelated paths."],
+    constraints: ["Preserve the declared interface and return current evidence."],
+    acceptanceCriteria: ["The bounded value path is implemented."],
+    requiredEvidence: ["Current source and command evidence"],
+    verificationModes: ["test"],
+    requirementIds: options.workerRequirementIds ?? ["REQ-001"]
+  }, config);
+
+  let extraDependency = null;
+  if (options.extraDependencyId) {
+    extraDependency = addTask(db, runId, {
+      id: options.extraDependencyId,
+      title: "Implement the unrelated dependency slice",
+      goal: "Implement an unrelated slice that must not satisfy verifier coverage.",
+      role: "worker",
+      runPhase: "execute",
+      milestoneId,
+      readOnly: false,
+      targetPaths: ["src/coverage-unrelated.js"],
+      scope: ["Implement only the unrelated dependency slice."],
+      nonGoals: ["Do not implement the bounded value path."],
+      constraints: ["Keep ownership exclusive."],
+      acceptanceCriteria: ["The unrelated dependency slice is bounded."],
+      requiredEvidence: ["Current source evidence"],
+      verificationModes: ["test"],
+      requirementIds: options.extraDependencyRequirementIds ?? ["REQ-001"]
+    }, config);
+  }
+  if (options.includeVerifier === false) return { worker, verifier: null, extraDependency };
+  const verifier = addTask(db, runId, {
+    id: options.verifierId ?? "coverage-verifier",
+    title: "Verify the bounded value path",
+    goal: "Verify the current bounded value path with independent evidence.",
+    role: "verifier",
+    runPhase: options.verifierPhase ?? "verify",
+    milestoneId,
+    parentTaskId: options.verifierParentTaskId ?? null,
+    readOnly: true,
+    targetPaths: [],
+    scope: ["Inspect the bounded value path and its current verification evidence."],
+    nonGoals: ["Do not modify implementation files."],
+    constraints: ["Use evidence from the current source or command result."],
+    acceptanceCriteria: options.verifierAcceptanceCriteria ?? ["The bounded value path is verified."],
+    requiredEvidence: options.verifierRequiredEvidence ?? ["Current source or command evidence"],
+    verificationModes: options.verificationModes ?? ["semantic"],
+    requirementIds: options.verifierRequirementIds ?? ["REQ-001"],
+    dependsOn: options.verifierDependsOn ?? (extraDependency ? [extraDependency.id] : [worker.id])
+  }, config);
+  return { worker, verifier, extraDependency };
 }
 
 function addPlannerDraft(db, root, runId, config, content, suffix = "parallelism-test") {
@@ -405,6 +501,130 @@ test("plan lint rejects parallel mutable tasks with overlapping ownership", asyn
   }
 });
 
+test("plan lint requires a distinct verifier for every mutable implementation slice", () => {
+  const { root, db, config } = makeProject();
+  try {
+    const runId = enterPlan(db, root, config);
+    addVerifierCoverageGraph(db, runId, config, { includeVerifier: false });
+    addPlannerDeclaration(db, root, runId, config, {
+      eligible: false,
+      minimumSameWaveImplementationTasks: 2,
+      independentSlices: 1,
+      desiredWidth: 1,
+      rationale: "The single implementation boundary remains atomic."
+    });
+    const result = lintPlan(db, runId, config, root);
+    assert.ok(result.findings.some((finding) => finding.code === "IMPLEMENTATION_VERIFIER_MISSING"), JSON.stringify(result.findings));
+  } finally {
+    db.close();
+  }
+});
+
+test("plan lint requires verifier dependency reachability and requirement coverage", () => {
+  const { root, db, config } = makeProject();
+  try {
+    const runId = enterPlan(db, root, config);
+    addVerifierCoverageGraph(db, runId, config, { extraDependencyId: "unrelated-coverage-worker" });
+    addPlannerDeclaration(db, root, runId, config, {
+      eligible: true,
+      minimumSameWaveImplementationTasks: 2,
+      independentSlices: 2,
+      desiredWidth: 2,
+      rationale: "The two implementation slices have exclusive paths and independent acceptance boundaries."
+    });
+    const result = lintPlan(db, runId, config, root);
+    assert.ok(result.findings.some((finding) => finding.code === "IMPLEMENTATION_VERIFIER_DEPENDENCY_MISSING"), JSON.stringify(result.findings));
+  } finally {
+    db.close();
+  }
+
+  const mismatch = makeProject();
+  try {
+    const runId = enterPlan(mismatch.db, mismatch.root, mismatch.config, {
+      contract: {
+        requirements: [
+          { id: "REQ-001", title: "Value behavior", description: "The value behavior is delivered.", kind: "functional", priority: "must", acceptance: ["Value behavior works."] },
+          { id: "REQ-002", title: "Separate behavior", description: "The separate behavior is delivered.", kind: "functional", priority: "should", acceptance: ["Separate behavior works."] }
+        ]
+      }
+    });
+    addVerifierCoverageGraph(mismatch.db, runId, mismatch.config, { verifierRequirementIds: ["REQ-002"] });
+    addPlannerDeclaration(mismatch.db, mismatch.root, runId, mismatch.config, {
+      eligible: false,
+      minimumSameWaveImplementationTasks: 2,
+      independentSlices: 1,
+      desiredWidth: 1,
+      rationale: "The implementation remains one atomic boundary."
+    });
+    const result = lintPlan(mismatch.db, runId, mismatch.config, mismatch.root);
+    assert.ok(result.findings.some((finding) => finding.code === "IMPLEMENTATION_VERIFIER_REQUIREMENT_MISMATCH"), JSON.stringify(result.findings));
+  } finally {
+    mismatch.db.close();
+  }
+});
+
+test("plan lint keeps child verifier coverage in the coordinator subtree and requires its contract", () => {
+  const { root, db, config } = makeProject();
+  try {
+    const runId = enterPlan(db, root, config);
+    addVerifierCoverageGraph(db, runId, config, {
+      workerParentTaskId: "coordinator-a",
+      verifierParentTaskId: "coordinator-b"
+    });
+    addPlannerDeclaration(db, root, runId, config, {
+      eligible: false,
+      minimumSameWaveImplementationTasks: 2,
+      independentSlices: 1,
+      desiredWidth: 1,
+      rationale: "The child slice is intentionally coordinated as one boundary."
+    });
+    const result = lintPlan(db, runId, config, root);
+    assert.ok(result.findings.some((finding) => finding.code === "IMPLEMENTATION_VERIFIER_PARENT_MISMATCH"), JSON.stringify(result.findings));
+  } finally {
+    db.close();
+  }
+
+  const incomplete = makeProject();
+  try {
+    const runId = enterPlan(incomplete.db, incomplete.root, incomplete.config);
+    addVerifierCoverageGraph(incomplete.db, runId, incomplete.config, {
+      verifierAcceptanceCriteria: [],
+      verifierRequiredEvidence: [],
+      verificationModes: []
+    });
+    addPlannerDeclaration(incomplete.db, incomplete.root, runId, incomplete.config, {
+      eligible: false,
+      minimumSameWaveImplementationTasks: 2,
+      independentSlices: 1,
+      desiredWidth: 1,
+      rationale: "The implementation remains one atomic boundary."
+    });
+    const result = lintPlan(incomplete.db, runId, incomplete.config, incomplete.root);
+    assert.ok(result.findings.some((finding) => finding.code === "IMPLEMENTATION_VERIFIER_CONTRACT_INCOMPLETE"), JSON.stringify(result.findings));
+  } finally {
+    incomplete.db.close();
+  }
+});
+
+test("plan lint accepts a downstream verifier with shared requirement and complete evidence boundary", () => {
+  const { root, db, config } = makeProject();
+  try {
+    const runId = enterPlan(db, root, config);
+    addVerifierCoverageGraph(db, runId, config, { verifierPhase: "review" });
+    addPlannerDeclaration(db, root, runId, config, {
+      eligible: false,
+      minimumSameWaveImplementationTasks: 2,
+      independentSlices: 1,
+      desiredWidth: 1,
+      rationale: "The implementation and its downstream verifier form one atomic boundary."
+    });
+    const result = lintPlan(db, runId, config, root);
+    assert.equal(result.findings.some((finding) => finding.code.startsWith("IMPLEMENTATION_VERIFIER_")), false, JSON.stringify(result.findings));
+  } finally {
+    db.close();
+  }
+});
+
 test("plan lint rejects persisted obsolete review projections", () => {
   const { root, db, config } = makeProject();
   try {
@@ -434,11 +654,12 @@ test("plan lint rejects persisted obsolete review projections", () => {
 
 test("planner protocol requires conditional four-way same-wave fan-out", () => {
   const protocol = ROLE_PROTOCOLS.planner.join(" ");
-  assert.match(protocol, /at least four/i);
-  assert.match(protocol, /same earliest execution wave/i);
-  assert.match(protocol, /task- and milestone-dependency-independent/i);
+  assert.match(protocol, /scheduler/i);
+  assert.match(protocol, /desiredWidth.*희망 실행 폭/i);
+  assert.match(protocol, /same-wave implementation tasks must have no dependency path/i);
+  assert.match(protocol, /Dependencies are milestone\.dependsOn and task\.dependsOn arrays/i);
   assert.match(protocol, /canonical exclusive targetPaths/i);
-  assert.match(protocol, /four or more canonical mutable target paths/i);
+  assert.match(protocol, /최소 네 task나 네 파일.*분해 기준으로 사용하지 않는다/i);
   assert.match(protocol, /canonical lower-camel-case interfaces, milestones, and tasks arrays/i);
   for (const field of [
     "interfaces", "milestones", "tasks", "parallelism", "userVisibleOutcome", "exitCriteria",
@@ -453,12 +674,12 @@ test("planner protocol requires conditional four-way same-wave fan-out", () => {
   assert.match(protocol, /adversarial-reviewer=review/);
   assert.match(protocol, /planned task phases are role-bound/i);
   assert.match(protocol, /review or verification role in execute/i);
-  assert.match(protocol, /atomic or smaller-scope work/i);
+  assert.match(protocol, /결합된 변경은 수정 경로 수와 무관하게 원자적 작업으로 유지할 수 있다/);
   assert.match(protocol, /Always return PlanDraft\.parallelism/i);
   const schema = resultSchemaForRole("planner");
   assert.deepEqual(schema.PlanDraft.parallelism, {
     eligible: false,
-    minimumSameWaveImplementationTasks: 4,
+    minimumSameWaveImplementationTasks: 2,
     independentSlices: 1,
     desiredWidth: 1,
     rationale: ""
@@ -502,6 +723,49 @@ test("plan lint accepts four eligible same-wave worker slices", () => {
       independentSlices: 4,
       desiredWidth: 4,
       rationale: "The approved design exposes four independent slices."
+    });
+    const result = lintPlan(db, runId, config, root);
+    assert.equal(result.findings.some((finding) => finding.code.startsWith("PARALLELISM_")), false, JSON.stringify(result.findings));
+  } finally {
+    db.close();
+  }
+});
+
+test("eligible parallelism permits two independent implementation tasks", () => {
+  const { root, db, config } = makeProject({ config: { orchestration: { maxConcurrent: 4 } } });
+  try {
+    const runId = enterPlan(db, root, config);
+    addParallelWorkers(db, runId, config, { count: 2 });
+    addPlannerDeclaration(db, root, runId, config, {
+      eligible: true,
+      minimumSameWaveImplementationTasks: 2,
+      independentSlices: 2,
+      desiredWidth: 2,
+      rationale: "Two independent mutable slices have separate ownership and acceptance boundaries."
+    });
+    const result = lintPlan(db, runId, config, root);
+    assert.equal(result.findings.some((finding) => finding.code.startsWith("PARALLELISM_")), false, JSON.stringify(result.findings));
+  } finally {
+    db.close();
+  }
+});
+
+test("eligible parallelism preserves eight safe slices regardless of project Codex cap", () => {
+  const { root, db, config } = makeProject({ config: { orchestration: { maxConcurrent: 8 } } });
+  try {
+    mkdirSync(path.join(root, ".codex"));
+    writeFileSync(path.join(root, ".codex", "config.toml"), `[features.multi_agent_v2]
+enabled = true
+max_concurrent_threads_per_session = 4
+`);
+    const runId = enterPlan(db, root, config);
+    addParallelWorkers(db, runId, config, { count: 8 });
+    addPlannerDeclaration(db, root, runId, config, {
+      eligible: true,
+      minimumSameWaveImplementationTasks: 2,
+      independentSlices: 8,
+      desiredWidth: 8,
+      rationale: "Eight independent mutable slices are available; dispatch applies the project Codex session cap separately."
     });
     const result = lintPlan(db, runId, config, root);
     assert.equal(result.findings.some((finding) => finding.code.startsWith("PARALLELISM_")), false, JSON.stringify(result.findings));
@@ -699,6 +963,25 @@ test("eligible false permits one intentionally coupled task with up to three can
     });
     const result = lintPlan(db, runId, config, root);
     assert.equal(result.findings.some((finding) => finding.code.startsWith("PARALLELISM_FALSE_")), false, JSON.stringify(result.findings));
+  } finally {
+    db.close();
+  }
+});
+
+test("eligible false permits four coupled canonical paths with concrete rationale", () => {
+  const { root, db, config } = makeProject();
+  try {
+    const runId = enterPlan(db, root, config);
+    addExecutionTask(db, runId, config, {
+      targetPaths: ["src/schema.js", "src/codec.js", "src/index.js", "src/compat.js"]
+    });
+    addPlannerDeclaration(db, root, runId, config, {
+      eligible: false,
+      minimumSameWaveImplementationTasks: 2,
+      rationale: "The schema, codec, export, and compatibility files form one atomic interface boundary and must change together."
+    });
+    const result = lintPlan(db, runId, config, root);
+    assert.equal(result.findings.some((finding) => finding.code === "PARALLELISM_FALSE_BUNDLED_PATHS"), false, JSON.stringify(result.findings));
   } finally {
     db.close();
   }

@@ -217,9 +217,10 @@ export function sealAndApprovePlan(db, root, runId, config, options = {}) {
   }
   // Sealing first assigns any required default milestone. Bind the planner
   // receipt only after that deterministic graph normalization is complete.
-  sealPlan(db, runId, config);
+  const sealOptions = options.executionSettings === undefined ? {} : { executionSettings: options.executionSettings };
+  sealPlan(db, runId, config, sealOptions);
   const draft = bindCurrentPlanDraft(db, root, runId, config, options);
-  const sealed = sealPlan(db, runId, config);
+  const sealed = sealPlan(db, runId, config, sealOptions);
   const plan = putArtifact(db, root, runId, "plan", sealed.content, {
     status: "verified",
     metadata: {

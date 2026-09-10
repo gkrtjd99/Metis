@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import test from "node:test";
 import { addTask, claimTask, finishTask, getTask, prepareClaimedTask } from "../src/core/tasks.js";
+import { registerCheck, runChecks } from "../src/core/checks.js";
 import { forcePhase, makeProject, startTestRun } from "./helpers.js";
 import { advancePhase, putArtifact } from "../src/core/state.js";
 import { repositoryCodeFingerprint } from "../src/core/repository.js";
@@ -89,6 +90,48 @@ function subjectReviewFixture(role = "reviewer", kind = "integration-candidate",
   forcePhase(db, root, config, run.id, phase);
   const claim = claimTask(db, run.id, task.id, `${role}-owner`, config);
   return { root, config, db, run, task, claim, candidate };
+}
+
+function verifierFixture(options = {}) {
+  const { root, config, db } = makeProject();
+  const { run } = startTestRun(db, root, config, "Verify a bounded task with criterion evidence.");
+  forcePhase(db, root, config, run.id, "plan");
+  const artifact = putArtifact(db, root, run.id, "verifier-evidence", { current: true }, { status: "verified" });
+  let check = null;
+  if (options.withCommand) {
+    check = registerCheck(db, run.id, {
+      id: "verifier-command-check",
+      name: "verifier-command-check",
+      command: { command: process.execPath, args: ["-e", "process.exit(0)"] },
+      requirementIds: ["REQ-001"]
+    });
+  }
+  const task = addTask(db, run.id, {
+    id: options.taskId ?? "criterion-verifier",
+    title: "Verify the bounded criterion behavior",
+    goal: "Verify each declared criterion with current independent evidence.",
+    role: "verifier",
+    taskKind: "verification",
+    runPhase: "verify",
+    wave: 1,
+    readOnly: true,
+    targetPaths: [],
+    scope: ["Inspect the bounded criterion behavior."],
+    nonGoals: ["Do not modify implementation files."],
+    constraints: ["Use only current typed evidence."],
+    acceptanceCriteria: options.acceptanceCriteria ?? ["The bounded criterion is verified."],
+    requiredEvidence: ["Current artifact evidence"],
+    verificationModes: ["semantic"],
+    requirementIds: ["REQ-001"]
+  }, config);
+  forcePhase(db, root, config, run.id, "verify");
+  if (check) {
+    const checks = runChecks(db, root, run.id, config, { name: check.name });
+    assert.equal(checks[0].status, "passed");
+  }
+  const claim = claimTask(db, run.id, task.id, "verifier-owner", config);
+  const artifactRef = { type: "artifact", id: artifact.id };
+  return { root, config, db, run, task, claim, artifact, artifactRef, check };
 }
 
 test("subject review completion rejects missing and mismatched artifact evidence", () => {
@@ -478,6 +521,123 @@ test("hostile finding identities and nested artifact refs are bounded without co
     assert.ok(countTokens(fixture.db, JSON.stringify(finished.result), { config: fixture.config }).tokens <= 700);
     assert.equal(finished.result.EvidenceRefs[0].id, fixture.candidate.id);
     assert.equal(finished.result.EvidenceRefs[0].contentRef, fixture.candidate.content_ref);
+  } finally {
+    fixture.db.close();
+  }
+});
+
+test("verifier completion rejects missing and incomplete criterion outcomes", () => {
+  const fixture = verifierFixture({ acceptanceCriteria: ["Criterion A is verified.", "Criterion B is verified."] });
+  try {
+    assert.throws(
+      () => finishTask(fixture.db, fixture.root, fixture.run.id, fixture.task.id, fixture.claim.leaseToken,
+        completedResult({ EvidenceRefs: [fixture.artifactRef] }), fixture.config),
+      (error) => error.code === "VERIFIER_ACCEPTANCE_RESULTS_REQUIRED"
+    );
+    assert.throws(
+      () => finishTask(fixture.db, fixture.root, fixture.run.id, fixture.task.id, fixture.claim.leaseToken,
+        completedResult({
+          AcceptanceResults: [{ Criterion: "Criterion A is verified.", Status: "verified", EvidenceRefs: [fixture.artifactRef] }],
+          EvidenceRefs: [fixture.artifactRef]
+        }), fixture.config),
+      (error) => error.code === "VERIFIER_ACCEPTANCE_RESULTS_REQUIRED"
+    );
+    assert.equal(getTask(fixture.db, fixture.task.id).status, "running");
+  } finally {
+    fixture.db.close();
+  }
+});
+
+test("verifier completion rejects failed, missing-evidence, and stale criterion results", () => {
+  const failed = verifierFixture();
+  try {
+    assert.throws(
+      () => finishTask(failed.db, failed.root, failed.run.id, failed.task.id, failed.claim.leaseToken,
+        completedResult({
+          AcceptanceResults: [{ Criterion: "The bounded criterion is verified.", Status: "failed", EvidenceRefs: [failed.artifactRef] }],
+          EvidenceRefs: [failed.artifactRef]
+        }), failed.config),
+      (error) => error.code === "VERIFIER_ACCEPTANCE_STATUS_INVALID"
+    );
+  } finally {
+    failed.db.close();
+  }
+
+  const missingEvidence = verifierFixture();
+  try {
+    assert.throws(
+      () => finishTask(missingEvidence.db, missingEvidence.root, missingEvidence.run.id, missingEvidence.task.id, missingEvidence.claim.leaseToken,
+        completedResult({
+          AcceptanceResults: [{ Criterion: "The bounded criterion is verified.", Status: "verified", EvidenceRefs: [] }],
+          EvidenceRefs: [missingEvidence.artifactRef]
+        }), missingEvidence.config),
+      (error) => error.code === "VERIFIER_ACCEPTANCE_EVIDENCE_REQUIRED"
+    );
+  } finally {
+    missingEvidence.db.close();
+  }
+
+  const stale = verifierFixture();
+  try {
+    const staleArtifact = putArtifact(stale.db, stale.root, stale.run.id, "stale-criterion-evidence", { current: false }, { status: "stale" });
+    assert.throws(
+      () => finishTask(stale.db, stale.root, stale.run.id, stale.task.id, stale.claim.leaseToken,
+        completedResult({
+          AcceptanceResults: [{
+            Criterion: "The bounded criterion is verified.",
+            Status: "verified",
+            EvidenceRefs: [{ type: "artifact", id: staleArtifact.id }]
+          }],
+          EvidenceRefs: [stale.artifactRef]
+        }), stale.config),
+      (error) => error.code === "VERIFIER_ACCEPTANCE_EVIDENCE_STALE"
+    );
+  } finally {
+    stale.db.close();
+  }
+});
+
+test("verifier completion accepts current source, artifact, command, and positional evidence", () => {
+  const fixture = verifierFixture({
+    withCommand: true,
+    acceptanceCriteria: [
+      "The current source is verified.",
+      "The current artifact is verified.",
+      "The command result is verified.",
+      "The positional criterion is verified."
+    ]
+  });
+  try {
+    const finished = finishTask(fixture.db, fixture.root, fixture.run.id, fixture.task.id, fixture.claim.leaseToken,
+      completedResult({
+        AcceptanceResults: [
+          {
+            Criterion: "The current source is verified.",
+            Status: "verified",
+            EvidenceRefs: [{ type: "source", path: "package.json", startLine: 1, endLine: 1 }]
+          },
+          {
+            Criterion: "The current artifact is verified.",
+            Status: "verified",
+            EvidenceRefs: [fixture.artifactRef]
+          },
+          {
+            Criterion: "The command result is verified.",
+            Status: "verified",
+            EvidenceRefs: [{ type: "command", checkId: fixture.check.id }]
+          },
+          {
+            Status: "verified",
+            EvidenceRefs: [fixture.artifactRef]
+          }
+        ],
+        EvidenceRefs: [fixture.artifactRef]
+      }), fixture.config);
+    assert.equal(finished.status, "completed");
+    assert.equal(finished.result.AcceptanceResults.length, 4);
+    assert.equal(finished.result.AcceptanceResults[0].EvidenceRefs[0].type, "source");
+    assert.equal(finished.result.AcceptanceResults[1].EvidenceRefs[0].type, "artifact");
+    assert.equal(finished.result.AcceptanceResults[2].EvidenceRefs[0].type, "command");
   } finally {
     fixture.db.close();
   }

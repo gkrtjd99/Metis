@@ -36,6 +36,12 @@ test("drive applies deterministic fast-path transitions and stops before spawnin
     const started = fastRun(project);
     const first = driveController(project.db, project.root, started.run.id, started.controller, project.config);
     assert.equal(first.type, "SPAWN_BATCH");
+    assert.deepEqual(Object.keys(first.action.invocation).sort(), ["args", "cwd", "executable"]);
+    assert.ok(first.action.invocation.args.includes("--run"));
+    assert.equal(first.action.invocation.args[first.action.invocation.args.indexOf("--run") + 1], started.run.id);
+    assert.deepEqual(first.action.hostProtocol.sequence, ["claim", "wait-prepared", "spawn-all", "ack-once", "wait-host-completion"]);
+    assert.equal(first.action.hostProtocol.completion.hostNotification.runtimeEmits, false);
+    assert.equal(first.action.hostProtocol.completion.durableRuntimeEvent.type, "task.finished");
     assert.deepEqual(first.applied.map((item) => item.type), ["MATERIALIZE_FAST_PATH_PREREQUISITES", "ADVANCE_PHASE"]);
     assert.equal(first.action.type, "SPAWN_BATCH");
     assert.equal(project.db.prepare("SELECT phase FROM runs WHERE id = ?").get(started.run.id).phase, "execute");

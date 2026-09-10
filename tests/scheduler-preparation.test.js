@@ -35,6 +35,28 @@ function task(id) {
   };
 }
 
+test("strict effort claim rejects unconfirmed support before creating attempts or leases", () => {
+  const { root, db, config } = makeProject({ config: { delegation: { requireReadyTaskPacket: false } } });
+  try {
+    const { run, controller } = startTestRun(db, root, config, "Strict effort preflight");
+    forcePhase(db, root, config, run.id, "plan");
+    addTask(db, run.id, task("strict-effort"), config);
+    forcePhase(db, root, config, run.id, "execute");
+    assert.throws(
+      () => claimSchedule(db, root, run.id, config, {
+        owner: "strict-main", requireExactEffort: true, controllerFencingToken: controller.fencingToken
+      }),
+      (error) => error.code === "EFFORT_APPLICATION_UNAVAILABLE"
+    );
+    assert.equal(db.prepare("SELECT status, attempts, attempt_fence FROM tasks WHERE id = ?").get("strict-effort").status, "pending");
+    assert.equal(db.prepare("SELECT attempts, attempt_fence FROM tasks WHERE id = ?").get("strict-effort").attempts, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM leases WHERE task_id = ?").get("strict-effort").count, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM scheduler_batches WHERE run_id = ?").get(run.id).count, 0);
+  } finally {
+    db.close();
+  }
+});
+
 test("scheduler preparation is serialized while host fanout stays bounded at four or eight", () => {
   assert.equal(SCHEDULER_PREPARATION_CONCURRENCY, 1);
 
@@ -59,6 +81,13 @@ test("scheduler preparation is serialized while host fanout stays bounded at fou
       assert.equal(claimed.preparationConcurrency, 1);
       assert.deepEqual(claimed.preparation, { mode: "serialized", concurrency: 1, bounded: true });
       assert.equal(claimed.hostFanoutConcurrency, maxConcurrent);
+      assert.deepEqual(Object.keys(claimed.hostProtocol.ack.invocation).sort(), ["args", "cwd", "executable"]);
+      assert.ok(claimed.hostProtocol.ack.invocation.args.includes("--run"));
+      assert.equal(claimed.hostProtocol.ack.invocation.args[claimed.hostProtocol.ack.invocation.args.indexOf("--run") + 1], run.id);
+      assert.equal(claimed.hostProtocol.ack.requireReceiptPerTask, true);
+      assert.equal(claimed.hostProtocol.completion.hostNotification.runtimeEmits, false);
+      assert.equal(claimed.hostProtocol.completion.durableRuntimeEvent.type, "task.finished");
+      assert.equal(claimed.hostProtocol.security.controllerCredentialsToChildren, false);
       assert.equal(new Set(claimed.batch.map((item) => item.spawn.task_name)).size, maxConcurrent);
       assert.equal(new Set(claimed.batch.map((item) => item.spawn.idempotency_key)).size, maxConcurrent);
       assert.ok(claimed.batch.every((item) => item.spawn.batch_id === claimed.batchId));

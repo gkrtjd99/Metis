@@ -1,6 +1,6 @@
 import path from "node:path";
 import { invariant } from "./errors.js";
-import { getRun, latestArtifact, lifecycleReviewRequired, lifecycleRoute, putArtifact, recordEvent } from "./state.js";
+import { ensurePlannedExecutionCheckpoint, getRun, isFastPathV2, latestArtifact, lifecycleReviewRequired, lifecycleRoute, putArtifact, recordEvent } from "./state.js";
 import { getTask, listTasks } from "./tasks.js";
 import { listMilestones } from "./milestones.js";
 import { currentPlanDraftBinding } from "./plan-ingest.js";
@@ -10,7 +10,6 @@ import { evidenceRefIsCurrent, normalizeEvidenceRefs } from "./provenance.js";
 import { asArray, now, parseJson, pathsOverlap, sha256, stableStringify } from "./util.js";
 import { REVIEW_ROLES as REVIEW_ROLE_NAMES } from "./metadata.js";
 import { taskPacketStatus } from "./task-packets.js";
-import { budgetStatus } from "./budget.js";
 
 const BLOCKING_SEVERITIES = new Set(["error", "critical"]);
 const PLANNED_PHASES = new Set(["execute", "review", "verify", "curate"]);
@@ -34,7 +33,7 @@ function activeRequirements(db, runId) {
   return db.prepare("SELECT id, priority FROM requirements WHERE run_id = ? AND status <> 'superseded'").all(runId);
 }
 
-function plannerParallelismDeclaration(db, projectRoot, runId) {
+export function plannerParallelismDeclaration(db, projectRoot, runId) {
   if (!projectRoot) return { error: "Planner draft validation requires the project root." };
 
   try {
@@ -44,8 +43,8 @@ function plannerParallelismDeclaration(db, projectRoot, runId) {
       const sealedContent = parseJson(sealedPlan.content, null);
       const deterministicDraft = sealedContent?.planDraft;
       const deterministicDraftHash = String(sealedPlan.metadata?.planDraftHash ?? "").trim();
-      if (sealedPlan.metadata?.source === "bounded-fast-path" && deterministicDraftHash) {
-        invariant(deterministicDraft?.source === "bounded-fast-path", "PLAN_DRAFT_BINDING_INVALID", "The bounded fast-path PlanDraft source is invalid.");
+      if (["bounded-fast-path", "bounded-fast-path-v2"].includes(sealedPlan.metadata?.source) && deterministicDraftHash) {
+        invariant(["bounded-fast-path", "bounded-fast-path-v2"].includes(deterministicDraft?.source), "PLAN_DRAFT_BINDING_INVALID", "The bounded fast-path PlanDraft source is invalid.");
         invariant(sha256(stableStringify(deterministicDraft)) === deterministicDraftHash,
           "PLAN_DRAFT_BINDING_MISMATCH", "The bounded fast-path PlanDraft no longer matches its authenticated hash.");
         const sealedTaskIds = asArray(sealedContent.tasks).map((task) => task?.id).filter(Boolean).sort();
@@ -181,17 +180,75 @@ function normalizedAcceptance(value) {
   return typeof value === "string" ? value.trim().replace(/\s+/gu, " ").toLocaleLowerCase("en-US") : "";
 }
 
-function verificationParallelismFindings(db, runId, declaration, push, config = null) {
-  const report = verificationParallelismReport(db, runId, {
-    declaration,
-    hostCapacity: config?.orchestration?.maxConcurrent
-  });
+function verificationParallelismFindings(db, runId, declaration, push) {
+  const report = verificationParallelismReport(db, runId, { declaration });
   if (!report.enforced) return;
   for (const finding of report.findings) push("critical", finding.code, finding.claim);
 }
 
 function capabilityNames(task) {
   return new Set((task.capabilities ?? []).map((item) => typeof item === "string" ? item : item.name));
+}
+
+function verifierCoverageFindings(tasks, reaches, push) {
+  const implementationTasks = tasks.filter((task) => (
+    task.phase === "execute"
+      && !task.readOnly
+      && ["worker", "integrator"].includes(task.role)
+  ));
+  const verifiers = tasks.filter((task) => (
+    ["review", "verify"].includes(task.phase)
+      && task.role === "verifier"
+  ));
+
+  for (const implementation of implementationTasks) {
+    const candidates = verifiers.filter((verifier) => verifier.id !== implementation.id);
+    if (!candidates.some((verifier) => verifier.readOnly)) {
+      push("critical", "IMPLEMENTATION_VERIFIER_MISSING",
+        `Mutable implementation task ${implementation.id} needs a distinct read-only verifier.`);
+      continue;
+    }
+
+    const readOnlyCandidates = candidates.filter((verifier) => verifier.readOnly);
+    const dependencyCandidates = readOnlyCandidates.filter((verifier) => reaches(verifier.id, implementation.id));
+    if (dependencyCandidates.length === 0) {
+      push("critical", "IMPLEMENTATION_VERIFIER_DEPENDENCY_MISSING",
+        `Verifier coverage for implementation task ${implementation.id} must include a downstream dependency path.`);
+      continue;
+    }
+
+    const requirementCandidates = dependencyCandidates.filter((verifier) => (
+      implementation.requirementIds.some((requirementId) => verifier.requirementIds.includes(requirementId))
+    ));
+    if (requirementCandidates.length === 0) {
+      push("critical", "IMPLEMENTATION_VERIFIER_REQUIREMENT_MISMATCH",
+        `A downstream verifier for implementation task ${implementation.id} must share at least one requirement.`);
+      continue;
+    }
+
+    const ownerCandidates = implementation.parent_task_id
+      ? requirementCandidates.filter((verifier) => verifier.parent_task_id === implementation.parent_task_id)
+      : requirementCandidates;
+    if (ownerCandidates.length === 0) {
+      push("critical", "IMPLEMENTATION_VERIFIER_PARENT_MISMATCH",
+        `Verifier coverage for child implementation task ${implementation.id} must remain in the same coordinator subtree.`);
+      continue;
+    }
+
+    const completeCandidates = ownerCandidates.filter((verifier) => (
+      verifier.acceptanceCriteria.length > 0
+        && verifier.verificationModes.length > 0
+        && verifier.requiredEvidence.length > 0
+    ));
+    if (completeCandidates.length === 0) {
+      const missing = [];
+      if (!ownerCandidates.some((verifier) => verifier.acceptanceCriteria.length > 0)) missing.push("acceptance criteria");
+      if (!ownerCandidates.some((verifier) => verifier.verificationModes.length > 0)) missing.push("verification modes");
+      if (!ownerCandidates.some((verifier) => verifier.requiredEvidence.length > 0)) missing.push("required evidence");
+      push("critical", "IMPLEMENTATION_VERIFIER_CONTRACT_INCOMPLETE",
+        `Verifier coverage for implementation task ${implementation.id} lacks ${missing.join(", ") || "a complete evidence contract"}.`);
+    }
+  }
 }
 
 function taskQualityFindings(task, tasks, push) {
@@ -231,6 +288,8 @@ export function lintPlan(db, runId, config = null, projectRoot = null) {
   const milestones = listMilestones(db, runId);
   const requirements = activeRequirements(db, runId);
   const route = lifecycleRoute(parseJson(db.prepare("SELECT route_json FROM runs WHERE id = ?").get(runId)?.route_json, {}));
+  // 검토 역할 예외는 immutable 계획과 정확히 두 task의 결속이 인증된 fast-v2에만 적용한다.
+  const fastV2 = projectRoot ? isFastPathV2(db, projectRoot, runId) : false;
   const findings = [];
   const push = (severity, code, claim, evidenceRefs = []) => findings.push({ severity, code, claim, evidenceRefs });
   const canonicalPaths = new Map();
@@ -286,6 +345,7 @@ export function lintPlan(db, runId, config = null, projectRoot = null) {
   const milestoneReaches = dependencyClosure(milestones);
   const implementationTasks = tasks.filter((task) => task.phase === "execute"
     && !task.readOnly && ["worker", "integrator"].includes(task.role));
+  verifierCoverageFindings(tasks, reaches, push);
   const parallelismState = plannerParallelismDeclaration(db, projectRoot, runId);
   const parallelism = parallelismState.declaration;
   const verificationDeclaration = parallelismState.verificationDeclaration;
@@ -305,8 +365,8 @@ export function lintPlan(db, runId, config = null, projectRoot = null) {
       }
       if (parallelismEligible === true) {
         const minimum = Number(parallelism.minimumSameWaveImplementationTasks ?? parallelism.MinimumSameWaveImplementationTasks);
-        if (!Number.isInteger(minimum) || minimum < 4) {
-          push("critical", "PARALLELISM_DECLARATION_INVALID", "An eligible parallel plan must declare a minimumSameWaveImplementationTasks value of at least 4.");
+        if (!Number.isInteger(minimum) || minimum < 2) {
+          push("critical", "PARALLELISM_DECLARATION_INVALID", "An eligible parallel plan must declare a minimumSameWaveImplementationTasks value of at least 2.");
         } else {
           const executeTasks = tasks.filter((task) => task.phase === "execute");
           const earliestWave = executeTasks.length > 0 ? Math.min(...executeTasks.map((task) => Number(task.wave))) : null;
@@ -335,20 +395,12 @@ export function lintPlan(db, runId, config = null, projectRoot = null) {
               && pathsAreExclusive(left, right, canonicalPaths)
               && acceptanceCompatible(left, right);
             const safeSlices = maximumCompatibleSubset(sameWave, safeCompatible);
-            const hostCapacity = declaredInteger(config?.orchestration?.maxConcurrent) ?? Number.POSITIVE_INFINITY;
-            let remainingSpawnBudget = Number.POSITIVE_INFINITY;
-            try {
-              remainingSpawnBudget = budgetStatus(db, runId).remaining.agentSpawns ?? Number.POSITIVE_INFINITY;
-            } catch {
-              // Low-level callers may lint an uninitialized fixture; host capacity still applies.
-            }
-            const expectedWidth = Math.min(hostCapacity, safeSlices, remainingSpawnBudget);
+            const expectedWidth = safeSlices;
             if (independentSlices && independentSlices !== safeSlices) {
               push("critical", "PARALLELISM_INDEPENDENT_SLICES_MISMATCH", `Declared independentSlices ${independentSlices} does not match the ${safeSlices} safe independent slices in the earliest execution wave.`);
             }
-            if (desiredWidth && desiredWidth !== expectedWidth) {
-              const underutilized = desiredWidth < expectedWidth && !couplingRationale(rationale);
-              push("critical", underutilized ? "PARALLELISM_WIDTH_UNDERUTILIZED" : "PARALLELISM_DESIRED_WIDTH_MISMATCH", `Declared desiredWidth ${desiredWidth} must equal min(host capacity ${hostCapacity}, safe independent slices ${safeSlices}, remaining spawn budget ${remainingSpawnBudget}) = ${expectedWidth}.`);
+            if (desiredWidth && desiredWidth > expectedWidth) {
+              push("critical", "PARALLELISM_DESIRED_WIDTH_MISMATCH", `Declared desiredWidth ${desiredWidth} exceeds the ${expectedWidth} safe independent slices in the earliest execution wave.`);
             }
             const acceptanceOwners = new Map();
             for (const task of sameWave) {
@@ -385,8 +437,8 @@ export function lintPlan(db, runId, config = null, projectRoot = null) {
           push("critical", "PARALLELISM_ATOMIC_ONLY", "An ineligible parallel plan must keep implementation work to one atomic task unless its rationale names the coupling that prevents fan-out.");
         }
         const bundled = implementationTasks.find((task) => (canonicalPaths.get(task.id) ?? []).length >= 4);
-        if (bundled) {
-          push("critical", "PARALLELISM_FALSE_BUNDLED_PATHS", `Task ${bundled.id} bundles at least four canonical mutable target paths; the plan cannot declare parallelism ineligible.`);
+        if (bundled && !couplingRationale(rationale)) {
+          push("critical", "PARALLELISM_FALSE_BUNDLED_PATHS", `Task ${bundled.id} bundles at least four canonical mutable target paths without a coupling rationale; the plan cannot declare parallelism ineligible.`);
         }
         if (hasCompatibleSubset(implementationTasks, 4, (left, right) => (
           independentlyRunnable(left, right, reaches, milestoneReaches)
@@ -410,8 +462,7 @@ export function lintPlan(db, runId, config = null, projectRoot = null) {
       db,
       runId,
       verificationDeclaration,
-      push,
-      config
+      push
     );
   }
 
@@ -442,11 +493,11 @@ export function lintPlan(db, runId, config = null, projectRoot = null) {
   }
 
   const integrationReviews = tasks.filter((task) => REVIEW_ROLES.has(task.role) && task.review_kind === "integration");
-  if (lifecycleReviewRequired(route, config, "integration") && integrationReviews.length === 0) {
+  if (!fastV2 && lifecycleReviewRequired(route, config, "integration") && integrationReviews.length === 0) {
     push("critical", "NO_INTEGRATION_REVIEW", "The plan has no independent integration review task.");
   }
   const adversarial = tasks.filter((task) => task.role === "adversarial-reviewer" && task.review_kind === "completion");
-  if (lifecycleReviewRequired(route, config, "completion") && adversarial.length === 0) {
+  if (!fastV2 && lifecycleReviewRequired(route, config, "completion") && adversarial.length === 0) {
     push("critical", "NO_ADVERSARIAL_REVIEW", "The plan has no adversarial completion review task.");
   }
   const verifierTasks = tasks.filter((task) => ["review", "verify"].includes(task.phase) && task.role === "verifier");
@@ -464,7 +515,7 @@ export function lintPlan(db, runId, config = null, projectRoot = null) {
     }
   }
   const curatorTasks = tasks.filter((task) => task.phase === "curate" && task.role === "curator");
-  if (route.documentationRequired !== false && curatorTasks.length === 0) push("error", "NO_CURATOR_TASK", "The plan has no curator task for documentation and knowledge consistency.");
+  if (!fastV2 && route.documentationRequired !== false && curatorTasks.length === 0) push("error", "NO_CURATOR_TASK", "The plan has no curator task for documentation and knowledge consistency.");
 
   if (config) {
     const required = requiredSpecialistRoles(tasks.filter((task) => task.phase === "execute"), config);
@@ -586,5 +637,6 @@ export function recordPlanReview(db, projectRoot, runId, input, config) {
     verdict,
     blockingFindings: blocking.length
   });
+  if (verdict === "APPROVED") ensurePlannedExecutionCheckpoint(db, projectRoot, run.id, config);
   return { ...review, artifactId: artifact.id };
 }

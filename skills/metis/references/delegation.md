@@ -114,13 +114,18 @@ repay coordination cost and the host has capacity, such as:
 - non-overlapping implementation slices;
 - independent review and verification dimensions.
 
-Do not split work merely to increase parallelism. Follow the runtime's
-eligible gate: four dependency-independent, non-overlapping mutable
-implementation slices require at least four same-wave worker or integrator
-tasks with exclusive paths and distinct acceptance criteria. Below that gate,
-keep genuinely atomic or coupled work atomic. Preserve an explicit parallel
-requirement and record the evidence-based rationale. Use a synthesis or
-integration wave after fan-out when one canonical artifact is required.
+Do not split work merely to increase parallelism or to fill available host
+slots. The planner must record an evidence-based rationale for the independent
+slices, the selected graph width, and any coupled work kept atomic. Preserve an
+explicit parallel requirement, but never create unsafe overlapping slices to
+satisfy it. The sealed graph expresses safe independence; the scheduler applies
+the active host's configured simultaneous-child capacity and Metis budgets
+separately. An eight-task independent graph may therefore run four at a time on
+a host configured with capacity four, while remaining a graph of eight. Do not
+infer a universal cap or a Codex/Claude-specific constant. Reuse the existing
+plan-critic's over/under-splitting rationale checks; do not add a classifier or
+force an always-on critic or owner. Use a synthesis or integration wave after
+fan-out when one canonical artifact is required.
 
 ## Task Packets
 
@@ -174,7 +179,9 @@ Use `fork_turns: "none"` for Codex children.
 
 A task claim does not consume spawn budget.
 Acknowledge only host spawns that returned a nonempty child/session/agent
-receipt bound to each task and attempt:
+receipt bound to each task and attempt. The normal host path is one bundled ACK
+for every descriptor in the prepared batch; partial ACK is retained only for
+explicit recovery when a host rejected or failed to create a descriptor:
 
 ```sh
 metis schedule ack <batch-id> --tasks <id1,id2> --receipts '{"<id1>":{"receipt":"<host-receipt-1>","batchId":"<batch-id>","taskId":"<id1>","attemptFence":1},"<id2>":{"receipt":"<host-receipt-2>","batchId":"<batch-id>","taskId":"<id2>","attemptFence":1}}' --owner metis-main --pretty
@@ -183,6 +190,29 @@ metis schedule ack <batch-id> --tasks <id1,id2> --receipts '{"<id1>":{"receipt":
 Acknowledgement is idempotent only for the same receipt. It consumes spawn and
 research budget once. A missing or conflicting receipt is rejected. Abort
 rejected or unspawned batches explicitly.
+
+### Host spawn protocol
+
+The runtime action may include additive typed `invocation` objects with exactly
+`{executable, args, cwd}`. Execute the returned argv directly; never evaluate a
+command string, interpolate a shell fragment, or pass controller credentials to
+a child. The host sequence is:
+
+1. invoke the typed `schedule claim` action and wait until the result is
+   `prepared`;
+2. spawn every returned descriptor, retaining each real host receipt;
+3. submit one `schedule ack` with all task receipts from that batch; and
+4. wait for the host's own process/session completion notification when the host
+   provides one. Metis does not emit or imply a native host callback.
+
+A host notification is only a signal to collect the terminal handoff. It is not
+runtime completion: first check durable task state; if the task is nonterminal,
+the host must ingest the result and execute the typed terminal-handoff `task
+finish`. If it is already terminal, do not finish it again. Only after that
+durable runtime state (`task.finished`) may Main request `next`. When native host notification is
+unavailable, use one bounded wait interval and the returned lease heartbeat
+commands; do not repeatedly call `ScheduleWakeup`, `ListAgents`, or equivalent
+probes. Missing receipts still require the fenced recovery/abort path.
 
 ## Context partition
 

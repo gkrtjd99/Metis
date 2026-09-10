@@ -1,6 +1,6 @@
 # Operations
 
-Metis 1.1.0, the current public release, runs one managed repository objective
+Metis 1.2.0, the current public release, runs one managed repository objective
 through a subagent-first lifecycle. Local verification checks are recorded in
 `VERIFICATION.md`; release packaging and future publication steps are described
 in `RELEASING.md`. Main remains the controller.
@@ -11,7 +11,7 @@ Fresh subagents perform repository inspection, research, design, planning, imple
 From a packaged archive:
 
 ```sh
-npm install -g ./metis-orchestrator-1.1.0.tgz
+npm install -g ./metis-orchestrator-1.2.0.tgz
 ```
 
 Install one or all host adapters from the repository root:
@@ -26,7 +26,7 @@ metis doctor --pretty
 ```
 
 The plugin remains passive until the user writes the literal `$metis` marker.
-The install example names the latest public 1.1.0 archive.
+The install example names the latest public 1.2.0 archive.
 
 Before starting a goal, the host must expose the globally installed Metis
 plugin/command surface: `/metis` must resolve and `/goal $metis "<objective>"`
@@ -64,11 +64,193 @@ perform an unrelated repository scan. A non-Git root is rejected before host or
 runtime mutation. Start a managed goal separately by writing `$metis` in the
 host.
 
+## Continuation preview
+
+The existing `/goal $metis` path remains the legacy native-evaluator path.
+Standalone continuation is an explicit opt-in preview and is not a supported
+full-goal E2E claim. `metis init` does not install continuation hooks.
+
+Install or uninstall hooks only for the supported preview hosts:
+
+```sh
+metis continuation install --host claude
+metis continuation install --host codex
+metis continuation uninstall --host claude
+metis continuation uninstall --host codex
+```
+
+The installer merges only its host-specific managed command hooks: Claude uses
+`Stop`, `SessionStart`, `StopFailure`, and `SessionEnd`; Codex uses `Stop` and
+`SessionStart`. It keeps unrelated host settings and refuses to overwrite a
+changed managed hook. The install manifest controls safe removal; modified or
+unknown user content is preserved. OpenCode has no continuation hook support.
+Installation does not grant native hook trust. Codex project hooks may remain
+blocked until the operator approves them through the host's native trust flow;
+do not bypass that boundary. Verify SessionStart delivery before binding.
+
+Remove continuation hooks before removing the ordinary host adapter. A regular
+`metis uninstall` refuses while continuation-hook metadata remains:
+
+```sh
+metis continuation uninstall --host claude
+metis continuation uninstall --host codex
+metis uninstall --host claude
+metis uninstall --host codex
+```
+
+Bind an actual host session to the active run using the existing controller
+credentials. The operator must explicitly pass `--native-goal-inactive` and a
+non-empty `--evidence`; the hook cannot infer or clear native-goal state.
+
+```sh
+metis continuation inspect --host codex --session-id <native-session-id>
+metis continuation bind --host codex --session-id <native-session-id> \
+  --native-goal-inactive --evidence "native goal disabled by operator" \
+  --controller-session <id> --controller-owner <owner> \
+  --controller-token <token> --controller-fence <fence>
+metis continuation detach --host codex --session-id <native-session-id> \
+  --controller-session <id> --controller-owner <owner> \
+  --controller-token <token> --controller-fence <fence>
+```
+
+`inspect` performs a read-only pre-existing-state projection: it must not create
+`.metis`, initialize a database, sample progress, renew a lease, spawn work, or
+change runtime state. Use `--rebind` only for an explicit same-controller,
+same-session reset of delivery bookkeeping; it is not takeover and does not
+change the run. A normal repeated bind is idempotent.
+
+이 preview는 WAL·shared-memory index·rollback journal 보조 파일이 없는
+정지 상태의 database만 읽습니다. 보조 파일이 하나라도 있으면 이를 생성하거나
+재생성할 수 있는 연결을 열지 않고 `PAUSE / STATE_BUSY`를 반환합니다. A normal CLI command closes
+its database before the Stop hook; a long-running database user may therefore
+pause continuation. Do not delete WAL files to force a read. Immutable reads
+are bracketed by file identity and sidecar checks, and concurrent changes cause
+a pause instead of using the snapshot.
+
+The hook uses the host's actual session ID and never invents one. Its Stop
+response is deterministic and evaluator-free. `CONTINUE` delegates the next
+Main action to the existing `metis` path; it does not execute that action itself.
+The read-only projection returns `WAIT` for receipt-backed active children.
+The hook allows a native wait only when the host event also contains visible
+background evidence; without that evidence it pauses instead. The hook never
+automatically renews controller or task leases.
+`COMPLETE` is returned only for durable runtime completion; host stop text, a
+passing test, or hook exit is not completion. Host no-progress and block caps
+bound continuation, so unlimited unattended execution is not promised.
+
+Use the canonical controller credentials for all mutating commands and keep
+binding evidence out of prompts and logs.
+
 Use `metis lifecycle --root /absolute/project --pretty` to read the project
 route without creating runtime state or changing controller ownership. Routes
 are `no-run`, `active-live-controller`, `active-expired-controller`, `paused`,
 and `completed`. An expired controller requires an explicit takeover; Metis
 never performs automatic takeover.
+
+## Durable skill workflow (preview)
+
+The durable skill route is separate from the native `/goal $metis` evaluator and
+must be entered explicitly:
+
+```text
+$metis prd "idea" -> $metis plan @path -> $metis run
+```
+
+`prd` conducts the short interview and writes the PRD document only. It does
+not start a goal or enter a `start`/`next`/`drive`/`spawn` loop. `plan` starts
+with mandatory `--plan-only`; it sets
+`Goal Contract.route.executionApprovalRequired` to `true` and stops at the
+existing sealed-plan/review authority checkpoint. Execution requires an explicit
+approval recorded by the current CLI path, for example:
+
+```sh
+metis plan execute --reason "approved execution"
+```
+
+계획 단계의 host dialog는 현재 model/effort 값을 미리 채워 보여 주며, 사용자가
+확인한 입력만 sealed plan에 저장합니다. 일반 plan은 다음처럼 입력하며 `--file`도
+같은 JSON 계약을 사용합니다:
+
+```sh
+metis plan seal --data '{"executionSettings":{"host":"<current-host>","model":"<host-confirmed-model>","requestedEffort":"high","confirmed":true,"evidence":"사용자 확인"}}'
+```
+
+runtime은 입력에서 `mode: "exact"`와 `userApproval`을 만들고 scheduler/direct claim의
+strict 전달을 자동 적용합니다. `effectiveEffort`, `supportedEfforts`,
+`capabilityStatus`, `effortSource`, provider/host confirmation은 사용자가 입력하지
+않습니다. Fast 경로도 동일한 승인 입력을 받습니다:
+
+```sh
+metis drive --data '{"executionSettings":{"model":"<concrete-model>","requestedEffort":"high","confirmed":true,"evidence":"bounded approval"}}'
+```
+
+Fast 설정은 worker/verifier child route만 바꾸며 Main host session의 model/effort는
+바꾸지 않습니다. 기존 canonical fast plan에 다른 설정을 다시 주면
+`FAST_PATH_EXECUTION_SETTINGS_REAPPROVAL`로 멈춥니다. 실행 중 task/lease가 없는지 확인한
+뒤 다음 순서로 현재 fast 계획을 discover 단계로 재개방하고 새 설정을 승인합니다:
+
+```sh
+metis reopen discover "새 model/effort 선택"
+metis drive --data '{"executionSettings":{"model":"<concrete-model>","requestedEffort":"high","confirmed":true,"evidence":"사용자 재승인"}}'
+```
+
+`reopen discover`는 기존 canonical fast plan/review를 stale 처리하고 downstream task를
+pending으로 되돌립니다. 새 설정은 requested=effective이며 known/safe-default이고 지원
+되는 effort여야 합니다. plan-only 계약이면 `metis plan execute --reason "새 실행 승인"`을
+다시 실행해야 하며, 같은 설정의 재실행만 idempotent입니다.
+
+`resume` continues the same paused workflow. It is not approval, controller
+takeover, or native-session rebind. Empty input and `status` inspect or preserve
+the current run context; they do not silently create a new goal. Existing
+`$metis:model` behavior is unchanged.
+
+After plan-only start, the runtime stores the PRD snapshot through the existing
+`artifact put` mechanism. The route records
+`sourceDocument: { artifactId, contentRef }`; that stored snapshot is immutable.
+A bounded `goal restore` restores handles for the current contract, plan,
+decisions, and runtime state. Restore is a recorded mutation, not a read-only
+reopen: it records context/object/token references but never raw PRD text, worker
+output, or credentials. The same-run source identity and tamper checks apply
+before restore or execution. The restore path does not reopen the original
+source document.
+
+### Goal-document storage
+
+1. Prepare a reviewed Markdown input. For a **new** PRD use
+   `metis goal prd --title "Goal title" --file draft.md --pretty`. This creates
+   `docs/metis/<goal-slug>/prd.md`, without attach/config/DB/run bootstrap.
+2. Reuse its returned relative path in `artifact put prd --file <prd> --path <prd>`
+   on the authorized planning run. Bind only `{artifactId, contentRef}` in the
+   contract. The artifact path identifies the folder and cannot change in place
+   once referenced by a contract; use a new snapshot and explicit amend to move.
+3. After a current plan seal, read `goal restore` and the referenced plan object;
+   save the template-derived summary to `documents.plan` (`plan.md`). Include
+   run/contract/seal references, not hand-maintained task progress. At the pending
+   execution-approval checkpoint, save the summary and stop without approval.
+4. Record decisions through `decision add`/`decision status` first, then derive
+   `documents.decisions` (`decisions.md`) from `decision list --status all` and
+   needed `decision get` records. The bounded restore list is not a full export.
+5. Run/resume/compact reuse `goal restore.documents`, never a recalculated slug,
+   newest-folder search, or new run. `unbound` preserves legacy/external PRDs and
+   source-free goals: report it, do not silently relocate them. Missing/edited
+   mutable PRDs do not alter immutable snapshots or cause automatic recreation.
+
+PRD creation and stored-path recovery are runtime enforced; summary writing and
+refresh after seal/decision changes are **host instructions, not auto-export or
+hooks**. Read existing files and recheck all parents immediately before host
+writes; preserve user edits and approval boundaries. Runtime is always authority.
+See [canonical rules](../skills/metis/references/prd.md) for exact NFC/whitespace,
+ASCII-stem (48 chars) + SHA-256 (12 hex) slug derivation. An occupied folder
+(including an empty folder or hash collision) is never overwritten or suffixed.
+Ask the user to reconcile or explicitly distinguish a new title. Unsafe descendant
+symlinks, hardlinks, and file-kind conflicts fail closed. Exclusive/no-follow PRD
+creation is not protection against hostile concurrent parent-directory swaps.
+
+Do not combine this PRD/plan route with native `/goal`, and do not expect it to
+clear native state automatically. Host-specific syntax and complete full-goal
+E2E behavior remain unverified. OpenCode skill deployment is distinct from
+OpenCode continuation-hook support; skill installation alone does not provide
+hooks. The continuation preview limits above still apply.
 
 ## Start one managed goal
 
@@ -219,6 +401,16 @@ when diagnosing a route:
 ```sh
 metis task attempts <task-id> --pretty
 ```
+
+계획 단계의 host dialog는 현재 model/effort를 미리 채워 보여 주고, 독립 역할과
+선택적 owner 설정을 사용자에게 확인받는다. 변경은 명시적 승인 후 runtime durable
+state에 저장하며, 실행과 resume는 그 값을 엄격히 재사용한다. 운영자가 내부 strict
+검사 flag를 기억하거나 provider별 전달 명령을 외울 필요는 없다. Runtime은 요청값,
+실제 생성 인자, host 확인값, provider 내부 적용 여부를 별도 상태로 기록하고,
+근거가 없으면 미확인·지원 불가·거부를 구분해 claim을 차단한다. Host dialog 확인은
+provider가 내부적으로 적용했다는 증거가 아니며, 권한 거부를 우회하거나 무음 fallback하지
+않는다. 실제 provider 전달 경로와 지원 여부는 해당 host adapter의 검증된 evidence만
+근거로 삼는다.
 
 Each claim creates an append-only attempt with requested/effective effort,
 capability evidence, host/model/role, batch and lease fences, failure class,
@@ -426,6 +618,11 @@ Main does not review its own orchestration result.
 Lifecycle candidates and approvals are produced only by their dedicated
 commands. `artifact put` and `artifact waive` reject protected lifecycle kinds;
 reviewer, verifier, and adversarial-reviewer tasks cannot be waived.
+새 bounded fast v2는 애초에 worker와 독립 verifier만 생성한다. 별도 검토 task를
+waive하는 것이 아니라, 현재 후보에 결속된 독립 verifier의 완료·수용 조건·서로 다른
+receipt에서 통합/완료 승인을 파생한다. `drive`가 이 기록과 deterministic 지식 기록을
+처리하며 별도 reviewer나 curator가 의미 검토했다고 표시하지 않는다. 내부 두 실행
+기록은 복원·권한·증거용으로 유지하고, 기존 fast v1과 balanced/full은 변경하지 않는다.
 
 Blocking review findings become repair tasks.
 After repair, run fresh review against the current code fingerprint.
@@ -579,7 +776,7 @@ metis benchmark compare repository-goals metis-pre-1.0-baseline metis-1.0.1-cand
 
 `metis-pre-1.0-baseline` and `metis-1.0.1-candidate` are existing comparison
 presets required by the benchmark suite. Keep these historical identifiers;
-they are not 1.1.0 performance evidence and no new benchmark claim is made.
+they are not 1.2.0 performance evidence and no new benchmark claim is made.
 
 The official comparison fails closed unless both commits exist, differ, the
 candidate equals the clean checkout at `HEAD`, every durable result names the

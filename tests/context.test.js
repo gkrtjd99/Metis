@@ -179,6 +179,80 @@ test("compacted task contracts remain valid JSON and preserve breaking changes",
   assert.equal(compact.truncated, true);
 });
 
+test("clipped coordinator contracts preserve bounded child slice boundaries without secrets or raw results", () => {
+  const child = (id, role, readOnly) => ({
+    TaskId: id,
+    ParentTaskId: "owner-coordinator",
+    Slice: {
+      Name: `${role} named slice`,
+      Outcome: `${role} owns one independently verifiable outcome.`,
+      Role: role,
+      TaskKind: readOnly ? "verification" : "implementation",
+      RunPhase: readOnly ? "verify" : "execute",
+      Wave: 2,
+      Status: "pending"
+    },
+    Role: role,
+    TaskKind: readOnly ? "verification" : "implementation",
+    Title: `${role} bounded task`,
+    Goal: `${role} owns one concrete boundary.`,
+    Wave: 2,
+    RunPhase: readOnly ? "verify" : "execute",
+    Status: "pending",
+    ReadOnly: readOnly,
+    DependsOn: readOnly ? ["worker-slice-a"] : [],
+    RequirementIds: ["REQ-001"],
+    TargetPaths: readOnly ? [] : ["src/slice-a.js"],
+    Scope: ["Only the named source boundary."],
+    NonGoals: ["Do not touch unrelated paths."],
+    Constraints: ["Preserve the frozen interface."],
+    AcceptanceCriteria: ["The named behavior is independently verifiable."],
+    RequiredEvidence: ["Current source or command evidence"],
+    ExpectedOutputs: ["A bounded result"],
+    VerificationModes: [readOnly ? "semantic" : "test"],
+    Risk: "medium",
+    Effort: "small",
+    SliceType: readOnly ? "verification" : "vertical",
+    Interfaces: { Inputs: ["input-contract"], Outputs: ["output-contract"] },
+    StopConditions: ["Stop if the frozen interface is missing."],
+    ProgressSummary: "bounded progress",
+    ControllerCredentials: "controller-here",
+    LeaseToken: "lease-here",
+    RawResult: { secret: "raw-result-here", huge: "x".repeat(500_000) }
+  });
+  const contract = {
+    RunId: "run",
+    TaskId: "owner-coordinator",
+    TaskKind: "coordination",
+    AgentType: "metis-coordinator",
+    Model: "gpt-5.6-luna",
+    ChildTaskIds: ["worker-slice-a", "verifier-slice-a"],
+    ChildTasks: [child("worker-slice-a", "worker", false), child("verifier-slice-a", "verifier", true)],
+    RoleInstructions: ["Dispatch only named slices."],
+    CompiledPrompt: "coordinator instructions ".repeat(5000),
+    ResultSchema: { Status: "COMPLETED" }
+  };
+
+  const compact = compactTaskContract(contract, 1800);
+  const parsed = JSON.parse(compact.content);
+  assert.equal(compact.truncated, true);
+  assert.ok(compact.estimatedTokens <= 1800, `compact packet used ${compact.estimatedTokens} tokens`);
+  assert.deepEqual(parsed.ChildTaskIds, ["worker-slice-a", "verifier-slice-a"]);
+  assert.equal(parsed.ChildTasks.length, 2);
+  for (const item of parsed.ChildTasks) {
+    for (const field of [
+      "TaskId", "Slice", "TargetPaths", "Scope", "NonGoals", "Constraints", "DependsOn",
+      "AcceptanceCriteria", "RequiredEvidence", "VerificationModes", "Risk", "Effort",
+      "Interfaces", "StopConditions"
+    ]) assert.ok(Object.hasOwn(item, field), `${item.TaskId} lost ${field}`);
+  }
+  assert.equal(parsed.ChildTasks[0].TargetPaths[0], "src/slice-a.js");
+  assert.deepEqual(parsed.ChildTasks[1].DependsOn, ["worker-slice-a"]);
+  const serialized = JSON.stringify(parsed);
+  assert.doesNotMatch(serialized, /controller-here|lease-here|raw-result-here/u);
+  assert.ok(serialized.length < 20_000, `child envelope was not bounded: ${serialized.length}`);
+});
+
 test("clipped task contracts preserve every upstream result handle", () => {
   const predecessors = Array.from({ length: 3 }, (_, index) => ({
     TaskId: `scout-${index}`,

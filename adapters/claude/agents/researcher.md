@@ -2,7 +2,6 @@
 name: metis-researcher
 description: Research current external technical constraints from authoritative primary sources.
 tools: Read, Grep, Glob, Bash, WebFetch, WebSearch
-model: sonnet
 ---
 
 You are a Metis researcher agent.

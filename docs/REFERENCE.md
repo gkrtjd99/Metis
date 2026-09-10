@@ -8,7 +8,7 @@ Run `npm run docs:generate` after changing runtime metadata, defaults, layout, o
 ```json
 {
   "name": "metis-orchestrator",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "schemaVersion": 11,
   "configVersion": 6,
   "runtimeLayoutVersion": 4
@@ -532,14 +532,24 @@ Canonical database path:
 ```text
 Metis CLI
 
-Managed host entrypoint:
-  /goal $metis "<objective>"
+Host entrypoints:
+  $metis "<objective>"  (opt-in continuation preview; native goal inactive)
+  $metis prd "<idea>"  (목표 문서 작성만; 구현하지 않음)
+  $metis plan "<objective>" | @<document>  (계획만; 명시적인 run 필요)
+  $metis run | resume | status  (기존 목표 실행·복원·상태)
+  $metis:model  (기존 모델 설정 스킬)
+  /goal $metis "<objective>"  (legacy native-goal mode; do not bind continuation)
+  metis entry resolve --input '<text after $metis>'  (문법만 해석; 실행하지 않음)
 
 Install and controller ownership:
   metis init [--host codex|claude|opencode|all] [--force]
   metis attach [--host codex|claude|opencode|all]
   metis lifecycle
-  metis start <goal> [--host codex] [--approval autonomous-local]
+  metis continuation install|uninstall --host claude|codex
+  metis continuation inspect --host claude|codex --session-id <native-session-id>
+  metis continuation bind --host claude|codex --session-id <native-session-id> --native-goal-inactive --evidence <confirmation> [--rebind]
+  metis continuation detach --host claude|codex --session-id <native-session-id>
+  metis start <goal> [--host codex] [--approval autonomous-local] [--plan-only]
   metis controller status
   metis controller heartbeat
   metis controller takeover [--force --yes]
@@ -556,6 +566,9 @@ Install and controller ownership:
   metis resume
 
 Goal contract and traceability:
+  metis goal prd --title <title> --file <markdown>  (안전한 목표 폴더·PRD 생성; run 생성 없음)
+  metis goal restore [--tokens N]  (목표·출처·문서 경로·계획·진행 복원; controller 인증 필요)
+  metis plan execute --reason <explicit-run-request>  (현재 계획 실행 승인만; spawn하지 않음)
   metis contract freeze [--file file | --data json | stdin]
   metis contract get
   metis contract amend [--file file | --data json | stdin]
@@ -586,13 +599,13 @@ Planning and orchestration:
   metis model reset --yes
   metis milestone add|list|get ...
   metis design lint|seal|review ...
-  metis plan lint|seal|review|ingest ...
+  metis plan lint|seal|review|ingest ...  (seal은 --data/--file 실행 설정 승인 입력을 선택적으로 받음)
   metis interface add|get|list|freeze ...
   metis task packet compile|get|status|list ...
   metis capability list
   metis capability explain <task-id>
   metis schedule propose [--limit N] [--parent-task id]
-  metis schedule claim [--owner name] [--limit N] [--parent-task id]
+  metis schedule claim [--owner name] [--limit N] [--parent-task id] [--require-exact-effort]
   metis schedule ack <batch-id> --receipts '{"task-id":{"receipt":"host-child-receipt","batchId":"batch-id","taskId":"task-id","attemptFence":1}}' [--tasks id1,id2] [--owner name]
   metis schedule heartbeat <batch-id>
   metis schedule abort <batch-id> <reason>

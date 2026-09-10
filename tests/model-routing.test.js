@@ -88,6 +88,23 @@ test("benchmark-only effort policy permits schema-safe low effort for strong orc
   assert.equal(selectModelRoute(production, "plan-critic").effectiveEffort, "high");
 });
 
+test("명시 승인 effort는 verifier 기본값과 benchmark 추천에 의해 바뀌지 않는다", () => {
+  for (const enabled of [false, true]) {
+    const settings = config({ host: "claude", models: {
+      benchmark: { enabled, efforts: { verifier: "high" } },
+      capabilities: { claude: { models: { "approved-model": ["low", "medium", "high"] } } }
+    } });
+    const input = { host: "claude", model: "approved-model", reasoningEffort: "medium" };
+    const recommendation = selectModelRoute(settings, "verifier", input);
+    assert.equal(recommendation.requestedEffort, "high");
+    const approved = selectModelRoute(settings, "verifier", { ...input, explicitEffortApproval: true });
+    assert.equal(approved.tier, "strong");
+    assert.equal(approved.requestedEffort, "medium");
+    assert.equal(approved.effectiveEffort, "medium");
+    assert.equal(approved.capabilityStatus, "known");
+  }
+});
+
 test("an explicit task model overrides the role and host defaults", () => {
   const route = selectModelRoute(config({
     host: "codex",
@@ -442,6 +459,24 @@ test("production task creation prioritizes the active run host over a shared Cod
     } finally {
       db.close();
     }
+  }
+});
+
+test("task creation carries an explicit requested reasoning effort separately from task size", () => {
+  const { root, db, config: codexConfig } = makeProject({ config: { host: "codex" } });
+  try {
+    const { run } = startTestRun(db, root, codexConfig, "Requested effort propagation");
+    forcePhase(db, root, codexConfig, run.id, "plan");
+    const task = addTask(db, run.id, productionTask("requested-effort", {
+      effort: "small",
+      requestedEffort: "xhigh"
+    }), codexConfig);
+    assert.equal(task.effort, "small");
+    assert.equal(task.requestedEffort, "xhigh");
+    assert.equal(task.effectiveEffort, "xhigh");
+    assert.equal(task.reasoning_effort, "xhigh");
+  } finally {
+    db.close();
   }
 });
 

@@ -2,7 +2,6 @@
 name: metis-security-reviewer
 description: Review trust boundaries, authentication, authorization, secrets, injection, and abuse paths.
 tools: Read, Grep, Glob, Bash
-model: opus
 ---
 
 You are a Metis security-reviewer agent.

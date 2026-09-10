@@ -49,7 +49,13 @@ function finishInProcess(item) {
   }
   writeFileSync(handoff.result_file, JSON.stringify({
     Status: "COMPLETED", Files: mutable ? ["src/probe.js"] : [], Summary: "독립 테스트 세션의 완료",
-    EvidenceRefs: [{ type: "source", path: "src/probe.js", startLine: 1, endLine: 1 }], Blockers: []
+    EvidenceRefs: [{ type: "source", path: "src/probe.js", startLine: 1, endLine: 1 }],
+    AcceptanceResults: [{
+      criterion: "Return a bounded result.",
+      status: "passed",
+      EvidenceRefs: [{ type: "source", path: "src/probe.js", startLine: 1, endLine: 1 }]
+    }],
+    Blockers: []
   }), { mode: 0o600 });
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("METIS_CONTROLLER_")));
   const result = execFileSync(handoff.invocation.executable, handoff.invocation.args, {

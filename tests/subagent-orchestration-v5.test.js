@@ -32,7 +32,8 @@ function boundedTask(id, options = {}) {
     risk: options.risk ?? "medium",
     effort: options.effort ?? "medium",
     complexity: options.complexity ?? "medium",
-    verificationModes: options.verificationModes,
+    verificationModes: options.verificationModes ?? (options.role === "verifier" || options.role === "adversarial-reviewer" ? ["semantic"] : ["test"]),
+    sliceType: options.sliceType ?? (options.role === "verifier" ? "verification" : options.role === "adversarial-reviewer" ? "review" : options.role === "integrator" ? "integration" : "vertical"),
     capabilities: options.capabilities,
     contextRefs: options.contextRefs,
     interfaceInputs: options.interfaceInputs,
@@ -77,6 +78,8 @@ function fourSlicePlanDraft({ description = "Shared slice result contract." } = 
       readOnly: false,
       targetPaths: [`src/slice-${index + 1}.js`],
       scope: [`src/slice-${index + 1}.js`],
+      nonGoals: ["Do not expand the declared slice."],
+      constraints: ["Preserve the frozen interface contract."],
       acceptanceCriteria: [`slice-${index + 1}.js returns its complete value.`],
       requiredEvidence: ["Current test evidence"],
       expectedOutputs: ["implementation"],
@@ -86,6 +89,8 @@ function fourSlicePlanDraft({ description = "Shared slice result contract." } = 
       interfaceOutputs: [],
       risk: "low",
       effort: "small",
+      sliceType: "vertical",
+      verificationModes: ["test"],
       complexity: "low"
     }))
   };
@@ -533,8 +538,8 @@ test("planner output is ingested into frozen interfaces, milestones, task waves,
             readOnly: false,
             targetPaths: ["src/producer.js"],
             scope: ["src/producer.js"],
-            nonGoals: [],
-            constraints: [],
+            nonGoals: ["Do not expand the declared slice."],
+            constraints: ["Preserve the frozen interface contract."],
             acceptanceCriteria: ["Producer returns the frozen value shape."],
             requiredEvidence: ["test"],
             expectedOutputs: ["implementation"],
@@ -545,6 +550,8 @@ test("planner output is ingested into frozen interfaces, milestones, task waves,
             allowInterfaceChange: false,
             risk: "high",
             effort: "large",
+            sliceType: "vertical",
+            verificationModes: ["test"],
             complexity: "high"
           },
           {
@@ -559,15 +566,19 @@ test("planner output is ingested into frozen interfaces, milestones, task waves,
             readOnly: true,
             targetPaths: [],
             scope: ["value flow"],
-            nonGoals: [],
-            constraints: [],
+            nonGoals: ["Do not expand the declared slice."],
+            constraints: ["Preserve the frozen interface contract."],
             acceptanceCriteria: ["The caller receives the expected value."],
             requiredEvidence: ["current command evidence"],
             expectedOutputs: ["verification"],
             requirementIds: ["REQ-001"],
             interfaceInputs: ["api-v1"],
             interfaceOutputs: [],
-            dependsOn: ["producer"]
+            dependsOn: ["producer"],
+            risk: "medium",
+            effort: "small",
+            sliceType: "verification",
+            verificationModes: ["semantic"]
           }
         ]
       },
@@ -715,7 +726,7 @@ test("PlanDraft rejects measured unsupported independent-review task kind before
       id: "task-independent-review", title: "Independently review the integrated change",
       goal: "Review the integrated change without modifying it.", role: "reviewer",
       taskKind: "independent-review", runPhase: "review", wave: 2, milestoneId: "m-slices",
-      readOnly: true, targetPaths: [], scope: ["integrated change"], nonGoals: [], constraints: [],
+      readOnly: true, targetPaths: [], scope: ["integrated change"], nonGoals: ["Do not expand the declared slice."], constraints: ["Preserve the frozen interface contract."],
       acceptanceCriteria: ["Return an evidence-backed review."], requiredEvidence: ["Current source evidence"],
       expectedOutputs: ["review"], requirementIds: ["REQ-001"], dependsOn: draft.tasks.map((task) => task.id),
       interfaceInputs: [], interfaceOutputs: []
@@ -756,15 +767,16 @@ test("canonical review task kinds ingest and seal the complete four-slice plan",
         id: "task-integrate-slices", title: "Integrate all four completed slices",
         goal: "Integrate the four completed slices without changing their frozen contract.", role: "integrator", taskKind: "integration",
         runPhase: "execute", wave: 2, milestoneId: null, readOnly: true, targetPaths: [],
-        scope: ["four completed slices"], nonGoals: [], constraints: [], acceptanceCriteria: ["All four slices are integrated."],
+        scope: ["four completed slices"], nonGoals: ["Do not expand the declared slice."], constraints: ["Preserve the frozen interface contract."], acceptanceCriteria: ["All four slices are integrated."],
         requiredEvidence: ["Current integration evidence"], expectedOutputs: ["integration"], requirementIds: ["REQ-001"],
-        dependsOn: implementationIds, interfaceInputs: ["slice-result-v1"], interfaceOutputs: []
+        dependsOn: implementationIds, interfaceInputs: ["slice-result-v1"], interfaceOutputs: [],
+        risk: "high", effort: "medium", sliceType: "integration", verificationModes: ["test"]
       },
       {
         id: "task-independent-review", title: "Independently review the integrated change",
         goal: "Review the integrated change without modifying it.", role: "reviewer", taskKind: "review",
         runPhase: "review", wave: 3, milestoneId: null, readOnly: true, targetPaths: [],
-        scope: ["integrated change"], nonGoals: [], constraints: [], acceptanceCriteria: ["Return an evidence-backed review."],
+        scope: ["integrated change"], nonGoals: ["Do not expand the declared slice."], constraints: ["Preserve the frozen interface contract."], acceptanceCriteria: ["Return an evidence-backed review."],
         requiredEvidence: ["Current source evidence"], expectedOutputs: ["review"], requirementIds: ["REQ-001"],
         dependsOn: ["task-integrate-slices"], interfaceInputs: ["slice-result-v1"], interfaceOutputs: []
       },
@@ -772,23 +784,25 @@ test("canonical review task kinds ingest and seal the complete four-slice plan",
         id: "task-adversarial-review", title: "Adversarially review the completion candidate",
         goal: "Challenge the completion candidate for hidden failures.", role: "adversarial-reviewer", taskKind: "review",
         runPhase: "verify", wave: 3, milestoneId: null, readOnly: true, targetPaths: [],
-        scope: ["completion candidate"], nonGoals: [], constraints: [], acceptanceCriteria: ["Return an explicit adversarial verdict."],
+        scope: ["completion candidate"], nonGoals: ["Do not expand the declared slice."], constraints: ["Preserve the frozen interface contract."], acceptanceCriteria: ["Return an explicit adversarial verdict."],
         requiredEvidence: ["Current candidate evidence"], expectedOutputs: ["adversarial-review"], requirementIds: ["REQ-001"],
-        dependsOn: ["task-independent-review"], interfaceInputs: ["slice-result-v1"], interfaceOutputs: []
+        dependsOn: ["task-independent-review"], interfaceInputs: ["slice-result-v1"], interfaceOutputs: [],
+        risk: "high", effort: "medium", sliceType: "review", verificationModes: ["semantic"]
       },
       {
         id: "task-final-verification", title: "Run final integrated verification",
         goal: "Verify all four slices and authorized changes.", role: "verifier", taskKind: "verification",
         runPhase: "verify", wave: 4, milestoneId: null, readOnly: true, targetPaths: [],
-        scope: ["four-slice result"], nonGoals: [], constraints: [], acceptanceCriteria: ["All four slices pass verification."],
+        scope: ["four-slice result"], nonGoals: ["Do not expand the declared slice."], constraints: ["Preserve the frozen interface contract."], acceptanceCriteria: ["All four slices pass verification."],
         requiredEvidence: ["Final verifier output"], expectedOutputs: ["verification"], requirementIds: ["REQ-001"],
-        dependsOn: ["task-adversarial-review"], interfaceInputs: ["slice-result-v1"], interfaceOutputs: []
+        dependsOn: ["task-adversarial-review"], interfaceInputs: ["slice-result-v1"], interfaceOutputs: [],
+        risk: "medium", effort: "medium", sliceType: "verification", verificationModes: ["semantic"]
       },
       {
         id: "task-curate-evidence", title: "Curate completion evidence",
         goal: "Curate the final evidence without changing the repository.", role: "curator", taskKind: "curation",
         runPhase: "curate", wave: 5, milestoneId: null, readOnly: true, targetPaths: [],
-        scope: ["completion evidence"], nonGoals: [], constraints: [], acceptanceCriteria: ["Completion evidence is current and complete."],
+        scope: ["completion evidence"], nonGoals: ["Do not expand the declared slice."], constraints: ["Preserve the frozen interface contract."], acceptanceCriteria: ["Completion evidence is current and complete."],
         requiredEvidence: ["Current completion evidence"], expectedOutputs: ["curation"], requirementIds: ["REQ-001"],
         dependsOn: ["task-final-verification"], interfaceInputs: ["slice-result-v1"], interfaceOutputs: []
       }
@@ -1025,15 +1039,19 @@ test("plan draft ingestion is atomic when a later task is invalid", () => {
             readOnly: false,
             targetPaths: ["src/atomic-good.js"],
             scope: ["src/atomic-good.js"],
-            nonGoals: [],
-            constraints: [],
+            nonGoals: ["Do not expand the declared slice."],
+            constraints: ["Preserve the frozen interface contract."],
             acceptanceCriteria: ["The valid task is independently verifiable."],
             requiredEvidence: ["Current test evidence"],
             expectedOutputs: ["implementation"],
             requirementIds: ["REQ-001"],
             dependsOn: [],
             interfaceInputs: [],
-            interfaceOutputs: ["atomic-api-v1"]
+            interfaceOutputs: ["atomic-api-v1"],
+            risk: "medium",
+            effort: "small",
+            sliceType: "vertical",
+            verificationModes: ["test"]
           },
           {
             id: "atomic-invalid-task",
@@ -1047,15 +1065,19 @@ test("plan draft ingestion is atomic when a later task is invalid", () => {
             readOnly: false,
             targetPaths: ["../outside.js"],
             scope: ["../outside.js"],
-            nonGoals: [],
-            constraints: [],
+            nonGoals: ["Do not expand the declared slice."],
+            constraints: ["Preserve the frozen interface contract."],
             acceptanceCriteria: ["This task must never be materialized."],
             requiredEvidence: ["Current test evidence"],
             expectedOutputs: ["implementation"],
             requirementIds: ["REQ-001"],
             dependsOn: [],
             interfaceInputs: [],
-            interfaceOutputs: []
+            interfaceOutputs: [],
+            risk: "medium",
+            effort: "small",
+            sliceType: "vertical",
+            verificationModes: ["test"]
           }
         ]
       },

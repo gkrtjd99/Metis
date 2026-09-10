@@ -6,11 +6,13 @@ import { MetisError, invariant } from "./errors.js";
 import { loadConfig } from "./config.js";
 import { readObject, storeObject } from "./objects.js";
 import { repositoryCodeFingerprint, syncRepository } from "./repository.js";
-import { getArtifact, getRun, latestArtifact, putArtifact, recordEvent, touchRun } from "./state.js";
+import { getArtifact, getRun, latestArtifact, plannedExecutionApprovalStatus, putArtifact, recordEvent, touchRun } from "./state.js";
 import { ensureDefaultMilestone, getMilestone, listMilestones, refreshMilestoneStatuses, validateMilestoneGraph } from "./milestones.js";
 import { evidenceRefIsCurrent, evidenceRefIsVerifiable, evidenceSummary, normalizeEvidenceRefs } from "./provenance.js";
-import { escalateModelRoute, getCoordinatorChildRouteContext, selectModelRoute } from "./model-routing.js";
+import { EFFORT_ORDER, escalateModelRoute, getCoordinatorChildRouteContext, selectModelRoute } from "./model-routing.js";
 import { ownerVerificationGaps } from "./owner-authority.js";
+import { hostConcurrencyLimit } from "./host-capacity.js";
+import { plannerParallelismDeclaration } from "./plan-review.js";
 import { countTokens } from "./tokens.js";
 import { REVIEW_ROLES as REVIEW_ROLE_NAMES, ROLES as ROLE_NAMES } from "./metadata.js";
 import { ROLE_PROTOCOLS, defaultTaskKind, resultSchemaForRole, subjectEvidenceRequirement, validateTaskKind } from "./prompt-protocols.js";
@@ -586,6 +588,17 @@ export function addTask(db, runId, input, config) {
   }
   const capabilityNames = resolvedCapabilities.map((item) => item.name);
 
+  // `effort`는 task size이며 reasoning 요청과 분리한다.
+  const requestedReasoningEffort = field(
+    input,
+    "requestedEffort",
+    "RequestedEffort",
+    field(input, "reasoningEffort", "ReasoningEffort", input.requested_effort ?? input.reasoning_effort ?? null)
+  );
+  if (requestedReasoningEffort !== null && requestedReasoningEffort !== undefined) {
+    invariant(EFFORT_ORDER.includes(String(requestedReasoningEffort).trim().toLowerCase()),
+      "TASK_REASONING_EFFORT", `Unsupported reasoning effort: ${requestedReasoningEffort}.`);
+  }
   const route = selectModelRoute(config, role, {
     host: run.host,
     coordinatorChildContext,
@@ -595,7 +608,7 @@ export function addTask(db, runId, input, config) {
     complexity: field(input, "complexity", "Complexity", "medium"),
     modelTier: field(input, "modelTier", "ModelTier", null),
     model: field(input, "model", "Model", undefined),
-    reasoningEffort: field(input, "reasoningEffort", "ReasoningEffort", null)
+    reasoningEffort: requestedReasoningEffort
   });
   const id = suppliedId ?? makeId("task");
   const timestamp = now();
@@ -776,6 +789,54 @@ export function getRunnableTasks(db, runId, limit) {
   return runnableTasks(db, runId, limit).map((task) => hydrateTask(db, task));
 }
 
+function boundedChildList(value, maxItems = 12, maxChars = 240) {
+  return asArray(value).slice(0, maxItems).map((item) => String(item).slice(0, maxChars));
+}
+
+export function childTaskContract(db, taskId) {
+  const task = getTask(db, taskId);
+  return {
+    TaskId: task.id,
+    ParentTaskId: task.parent_task_id ?? null,
+    Slice: {
+      Name: String(task.title).slice(0, 240),
+      Outcome: String(task.goal).slice(0, 400),
+      Role: task.role,
+      TaskKind: task.taskKind,
+      RunPhase: task.phase,
+      Wave: task.wave,
+      Status: task.status
+    },
+    Role: task.role,
+    TaskKind: task.taskKind,
+    Title: String(task.title).slice(0, 240),
+    Goal: String(task.goal).slice(0, 400),
+    Wave: task.wave,
+    RunPhase: task.phase,
+    Status: task.status,
+    ReadOnly: task.readOnly,
+    DependsOn: boundedChildList(task.dependsOn),
+    RequirementIds: boundedChildList(task.requirementIds),
+    TargetPaths: boundedChildList(task.targetPaths),
+    Scope: boundedChildList(task.scope),
+    NonGoals: boundedChildList(task.nonGoals),
+    Constraints: boundedChildList(task.constraints),
+    AcceptanceCriteria: boundedChildList(task.acceptanceCriteria),
+    RequiredEvidence: boundedChildList(task.requiredEvidence),
+    ExpectedOutputs: boundedChildList(task.expectedOutputs),
+    VerificationModes: boundedChildList(task.verificationModes),
+    Risk: task.risk,
+    Effort: task.effort,
+    SliceType: task.sliceType,
+    Interfaces: {
+      Inputs: boundedChildList(task.interfaceInputs),
+      Outputs: boundedChildList(task.interfaceOutputs)
+    },
+    StopConditions: boundedChildList(task.stopConditions),
+    ProgressSummary: String(task.result?.Summary ?? "").slice(0, 400)
+  };
+}
+
 export function taskContract(db, taskId) {
   const task = getTask(db, taskId);
   const run = getRun(db, task.run_id);
@@ -850,9 +911,9 @@ export function taskContract(db, taskId) {
   } : null;
 
   const children = db.prepare(`
-    SELECT id, title, role, task_kind, wave, phase, status, priority, contract_status FROM tasks
+    SELECT id FROM tasks
     WHERE parent_task_id = ? ORDER BY wave, priority DESC, created_at
-  `).all(task.id);
+  `).all(task.id).map((row) => childTaskContract(db, row.id));
   const openReviewFindings = REVIEW_ROLES.has(task.role)
     ? db.prepare(`
         SELECT id, title, description, severity, status, target_paths_json, requirement_ids_json, suggested_fix
@@ -998,6 +1059,30 @@ export function prepareClaimedTask(db, runId, taskId, owner, config, options = {
     const task = db.prepare("SELECT * FROM tasks WHERE id = ? AND run_id = ?").get(taskId, run.id);
     invariant(task, "TASK_NOT_FOUND", `Task ${taskId} was not found in this run.`);
     invariant(taskCanRunInPhase(task, run.phase), "CLAIM_PHASE", `Task ${taskId} cannot run during ${run.phase}.`);
+    if (["execute", "review", "verify", "curate"].includes(task.phase)) {
+      const approval = plannedExecutionApprovalStatus(db, run.project_root, run.id, config);
+      invariant(approval.pass, "PLANNED_EXECUTION_APPROVAL_REQUIRED", approval.reason);
+      const settingStatus = taskPlanExecutionSettingStatus(db, run.project_root, run.id, task);
+      if (settingStatus.required) {
+        invariant(settingStatus.pass, "PLAN_EXECUTION_SETTINGS_DRIFT", settingStatus.reason, {
+          taskId: task.id, current: settingStatus.current ?? null, approved: settingStatus.entry ?? null
+        });
+        const supportedEfforts = parseJson(task.supported_efforts_json, []);
+        const requestedEffort = String(task.requested_effort ?? task.reasoning_effort ?? "").trim().toLowerCase();
+        const effectiveEffort = String(task.effective_effort ?? task.reasoning_effort ?? "").trim().toLowerCase();
+        const exactDelivery = new Set(["claude", "codex"]).has(String(run.host ?? "").trim().toLowerCase())
+          && Boolean(task.selected_model)
+          && ["known", "safe-default"].includes(String(task.capability_status ?? "unknown").trim().toLowerCase())
+          && Array.isArray(supportedEfforts)
+          && supportedEfforts.some((value) => String(value).trim().toLowerCase() === requestedEffort)
+          && effectiveEffort === requestedEffort;
+        invariant(exactDelivery, "EFFORT_APPLICATION_UNAVAILABLE", `승인된 exact effort를 task ${task.id}에 전달할 수 없습니다.`, {
+          taskId: task.id, host: run.host, model: task.selected_model ?? null,
+          requestedEffort, effectiveEffort, capabilityStatus: task.capability_status ?? "unknown",
+          supportedEfforts
+        });
+      }
+    }
     invariant(task.status === "pending", "TASK_NOT_PENDING", `Task ${taskId} is ${task.status}.`);
     if (config.delegation?.scheduleByWave !== false) {
       const wave = earliestOpenWave(db, run.id, run.phase);
@@ -1024,7 +1109,18 @@ export function prepareClaimedTask(db, runId, taskId, owner, config, options = {
     refreshMilestoneStatuses(db, run.id);
     invariant(runnableTasks(db, run.id, 1000).some((candidate) => candidate.id === taskId), "TASK_NOT_RUNNABLE", `Task ${taskId} is not runnable.`);
     const running = Number(db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE run_id = ? AND status = 'running'").get(run.id).count);
-    invariant(running < config.orchestration.maxConcurrent, "CONCURRENCY_LIMIT", "The configured concurrency limit is reached.");
+    const concurrency = hostConcurrencyLimit(run.project_root, run.host, config.orchestration.maxConcurrent);
+    invariant(running < concurrency, "CONCURRENCY_LIMIT", "The configured concurrency limit is reached.");
+    if (run.phase === "execute" && task.phase === "execute") {
+      const parallelism = plannerParallelismDeclaration(db, run.project_root, run.id);
+      const desiredWidth = !parallelism.error && parallelism.declaration?.eligible === true
+        ? Number(parallelism.declaration.desiredWidth ?? parallelism.declaration.DesiredWidth)
+        : null;
+      invariant(desiredWidth === null || !Number.isSafeInteger(desiredWidth) || desiredWidth <= 0 || running < desiredWidth,
+        "DESIRED_WIDTH_LIMIT", "계획이 선언한 desiredWidth를 초과하여 직접 task를 claim할 수 없습니다.", {
+          running, desiredWidth
+        });
+    }
     const conflicts = taskConflicts(task, activeLeases(db));
     if (conflicts.length > 0) throw new MetisError("RESOURCE_CONFLICT", "Task resources are already owned.", { conflicts });
     const update = db.prepare(`
@@ -1337,7 +1433,7 @@ function compactAcceptanceOutcome(item, preferredKind, preferredId) {
   return compact;
 }
 
-function compactAcceptanceResultsForTask(value, task, preferredKind = null, preferredId = null, maxItems = 16) {
+function selectAcceptanceResultsForTask(value, task, preferredId = null, maxItems = 16) {
   const items = asArray(value);
   const requiredIds = acceptanceCriterionIdSet(task, items);
   const requiredById = new Map();
@@ -1378,9 +1474,14 @@ function compactAcceptanceResultsForTask(value, task, preferredKind = null, pref
   // Contract-required outcomes are never displaced by optional verbose output.
   // Keep a bounded optional tail for compatibility with criteria not represented
   // in the frozen contract (and retain source order for deterministic replay).
-  const selected = [...required, ...optional.slice(0, Math.max(0, maxItems - required.length))]
-    .sort((left, right) => left.index - right.index);
-  return selected.map(({ item }) => compactAcceptanceOutcome(item, preferredKind, preferredId));
+  return [...required, ...optional.slice(0, Math.max(0, maxItems - required.length))]
+    .sort((left, right) => left.index - right.index)
+    .map(({ item }) => item);
+}
+
+function compactAcceptanceResultsForTask(value, task, preferredKind = null, preferredId = null, maxItems = 16) {
+  return selectAcceptanceResultsForTask(value, task, preferredId, maxItems)
+    .map((item) => compactAcceptanceOutcome(item, preferredKind, preferredId));
 }
 
 function compactChecks(value, maxItems, preferredKind = null, maxEvidenceItems = 4, maxText = 240, preferredId = null) {
@@ -1595,7 +1696,19 @@ function normalizeResult(input, projectRoot, evidenceRoot, db, taskId) {
     // Acceptance outcomes are typed contract evidence. Normalize them before
     // the raw result is persisted so hostile nested payloads cannot bypass the
     // active-state bounds through an untyped object field.
-    AcceptanceResults: compactAcceptanceResultsForTask(field(input, "acceptanceResults", "AcceptanceResults", []), task, preferredSubjectKind, preferredSubjectId, 100),
+    AcceptanceResults: compactAcceptanceResultsForTask(
+      normalizeAcceptanceResults(
+        db,
+        evidenceRoot,
+        field(input, "acceptanceResults", "AcceptanceResults", []),
+        task,
+        preferredSubjectId
+      ),
+      task,
+      preferredSubjectKind,
+      preferredSubjectId,
+      100
+    ),
     InterfaceReport: field(input, "interfaceReport", "InterfaceReport", { Consumed: [], Produced: [], Changed: [] }),
     Checks: compactItems(field(input, "checks", "Checks", []), 100, 1200),
     ProducedArtifacts: compactItems(field(input, "producedArtifacts", "ProducedArtifacts", []), 80, 5000),
@@ -1786,6 +1899,100 @@ function validateCurrentResultEvidence(db, workspaceRoot, projectRoot, task, evi
     });
 }
 
+const ACCEPTANCE_SUCCESS_STATUSES = new Set([
+  "pass", "passed", "approved", "complete", "completed", "verified", "ok"
+]);
+
+function normalizedCriterionValue(value) {
+  return String(value ?? "").trim().replace(/\\s+/gu, " ").toLocaleLowerCase("en-US");
+}
+
+function acceptanceCriterionValue(criterion) {
+  if (typeof criterion === "string") return normalizedCriterionValue(criterion);
+  if (!criterion || typeof criterion !== "object" || Array.isArray(criterion)) return "";
+  return normalizedCriterionValue(
+    criterion.id ?? criterion.criterionId ?? criterion.criterion ?? criterion.Criterion ?? criterion.name ?? criterion.Name
+  );
+}
+
+function acceptanceResultValue(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return "";
+  return normalizedCriterionValue(
+    result.CriterionId ?? result.criterionId ?? result.Criterion ?? result.criterion ?? result.Id ?? result.id
+  );
+}
+
+function normalizeAcceptanceEvidenceRefs(db, evidenceRoot, value) {
+  return asArray(value).slice(0, 200).flatMap((ref) => {
+    try {
+      return normalizeEvidenceRefs(db, evidenceRoot, [ref]);
+    } catch (error) {
+      if (error instanceof Error && /^Unsupported evidence reference type:/u.test(error.message)) return [];
+      throw error;
+    }
+  });
+}
+
+function normalizeAcceptanceResults(db, evidenceRoot, value, task, preferredId = null) {
+  return selectAcceptanceResultsForTask(value, task, preferredId, 100).map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const rawEvidence = item.EvidenceRefs ?? item.evidenceRefs ?? item.Evidence ?? item.evidence;
+    return {
+      ...item,
+      EvidenceRefs: normalizeAcceptanceEvidenceRefs(db, evidenceRoot, rawEvidence)
+    };
+  });
+}
+
+function validateVerifierAcceptanceEvidence(db, workspaceRoot, projectRoot, task, acceptanceResults) {
+  const criteria = asArray(task.acceptanceCriteria);
+  invariant(criteria.length > 0, "VERIFIER_ACCEPTANCE_CRITERIA_REQUIRED",
+    `Verifier task ${task.id} has no acceptance criteria to verify.`);
+  invariant(acceptanceResults.length === criteria.length, "VERIFIER_ACCEPTANCE_RESULTS_REQUIRED",
+    `Completed verifier task ${task.id} must return exactly one AcceptanceResults entry for each acceptance criterion.`, {
+      expected: criteria.length,
+      actual: acceptanceResults.length
+    });
+
+  const used = new Set();
+  criteria.forEach((criterion, criterionIndex) => {
+    const expected = acceptanceCriterionValue(criterion);
+    const matchIndex = acceptanceResults.findIndex((result, resultIndex) => {
+      if (used.has(resultIndex)) return false;
+      const actual = acceptanceResultValue(result);
+      return actual === expected || (!actual && resultIndex === criterionIndex);
+    });
+    invariant(matchIndex >= 0, "VERIFIER_ACCEPTANCE_CRITERION_MISSING",
+      `Verifier task ${task.id} is missing an outcome for acceptance criterion ${criterionIndex + 1}.`, {
+        criterion
+      });
+    used.add(matchIndex);
+
+    const result = acceptanceResults[matchIndex];
+    const status = normalizedCriterionValue(result?.Status ?? result?.status);
+    invariant(ACCEPTANCE_SUCCESS_STATUSES.has(status), "VERIFIER_ACCEPTANCE_STATUS_INVALID",
+      `Verifier task ${task.id} cannot complete with an unverified acceptance criterion.`, {
+        criterion,
+        status: result?.Status ?? result?.status ?? null
+      });
+    const evidenceRefs = asArray(result?.EvidenceRefs ?? result?.evidenceRefs ?? result?.Evidence ?? result?.evidence);
+    const verifiable = evidenceRefs.filter(evidenceRefIsVerifiable);
+    invariant(verifiable.length > 0, "VERIFIER_ACCEPTANCE_EVIDENCE_REQUIRED",
+      `Verifier task ${task.id} needs typed evidence for acceptance criterion ${criterionIndex + 1}.`, {
+        criterion
+      });
+    const stale = verifiable.filter((ref) => {
+      const evidenceRoot = ref?.type === "source" ? workspaceRoot : projectRoot;
+      return !evidenceRefIsCurrent(db, evidenceRoot, ref);
+    });
+    invariant(stale.length === 0, "VERIFIER_ACCEPTANCE_EVIDENCE_STALE",
+      `Verifier task ${task.id} cites stale or invalid criterion evidence.`, {
+        criterion,
+        evidence: stale.map(evidenceSummary)
+      });
+  });
+}
+
 export function finishTask(db, projectRoot, runId, taskId, leaseToken, input, config = null) {
   const run = getRun(db, runId);
   const task = getTask(db, taskId);
@@ -1800,6 +2007,9 @@ export function finishTask(db, projectRoot, runId, taskId, leaseToken, input, co
   if (requestedStatus === "COMPLETED") assertSubjectEvidenceRef(db, run, task, input);
   const normalized = normalizeResult(input, projectRoot, workspace.path, db, taskId);
   validateInterfaceReport(task, normalized);
+  if (normalized.Status === "COMPLETED" && task.role === "verifier") {
+    validateVerifierAcceptanceEvidence(db, workspace.path, run.project_root, task, normalized.AcceptanceResults);
+  }
   const outputEntries = taskOutputEntries(task, normalized);
   if (normalized.Status === "COMPLETED") {
     const baseline = baselineForTask(db, run, task);
@@ -2047,7 +2257,10 @@ export function retryTask(db, runId, taskId, reason, config = null, cause = "tra
   const run = getRun(db, runId);
   const effectiveConfig = config ?? loadConfig(run.project_root);
   const retry = transaction(db, () => {
-    const currentRow = db.prepare("SELECT run_id, status, attempts, max_attempts, attempt_fence, owner, transient_retry_count, failure_class, escalation_cause FROM tasks WHERE id = ?").get(taskId);
+    const currentRow = db.prepare(`SELECT run_id, status, attempts, max_attempts, attempt_fence, owner,
+      transient_retry_count, failure_class, escalation_cause, phase, selected_model,
+      requested_effort, effective_effort, effort_source, supported_efforts_json, capability_status,
+      reasoning_effort, model_tier FROM tasks WHERE id = ?`).get(taskId);
     invariant(currentRow, "TASK_NOT_FOUND", `Task ${taskId} was not found.`);
     invariant(currentRow.run_id === run.id, "TASK_RUN_MISMATCH", "Task does not belong to this run.");
     invariant(["blocked", "failed"].includes(currentRow.status), "TASK_RETRY_STATUS", `Cannot retry a ${currentRow.status} task.`);
@@ -2082,9 +2295,37 @@ export function retryTask(db, runId, taskId, reason, config = null, cause = "tra
     if (cause === "external" && !/(condition|constraint|authority|evidence).*(changed|updated|resolved|provided)/iu.test(reason)) {
       throw new MetisError("TASK_RETRY_EXTERNAL_EVIDENCE_REQUIRED", "External retries require evidence that the blocking condition changed.");
     }
-    assertBudgetAvailable(db, run.id, { retries: 1 });
     const task = getTask(db, taskId);
+    const currentSetting = ["execute", "review", "verify", "curate"].includes(task.phase)
+      ? taskPlanExecutionSettingStatus(db, run.project_root, run.id, task)
+      : { required: false, pass: true };
+    if (currentSetting.required) {
+      invariant(currentSetting.pass, "PLAN_EXECUTION_SETTINGS_DRIFT", currentSetting.reason, {
+        taskId: task.id, current: currentSetting.current ?? null, approved: currentSetting.entry ?? null
+      });
+    }
     const route = escalateModelRoute(effectiveConfig, task, cause, { host: run.host });
+    if (currentSetting.required) {
+      const projectedTask = {
+        ...task,
+        model_tier: route.tier,
+        selected_model: route.model,
+        requested_effort: route.requestedEffort,
+        effective_effort: route.effectiveEffort,
+        effort_source: route.effortSource,
+        supported_efforts_json: json(route.supportedEfforts ?? []),
+        capability_status: route.capabilityStatus ?? "unknown",
+        reasoning_effort: route.reasoningEffort
+      };
+      const projectedSetting = taskPlanExecutionSettingStatus(db, run.project_root, run.id, projectedTask);
+      invariant(projectedSetting.pass, "PLAN_EXECUTION_SETTINGS_RETRY_ESCALATION", "승인된 실행 설정은 retry escalation으로 변경할 수 없습니다. 새 plan 승인 후 다시 시도하세요.", {
+        taskId: task.id, cause, current: currentSetting.entry ?? null, proposed: {
+          model: route.model, requestedEffort: route.requestedEffort, effectiveEffort: route.effectiveEffort,
+          effortSource: route.effortSource, capabilityStatus: route.capabilityStatus ?? "unknown"
+        }
+      });
+    }
+    assertBudgetAvailable(db, run.id, { retries: 1 });
     const timestamp = now();
     const changed = db.prepare(`
       UPDATE tasks SET status = 'pending', owner = NULL, failure_class = ?, escalation_cause = ?,
@@ -2120,13 +2361,278 @@ export function retryTask(db, runId, taskId, reason, config = null, cause = "tra
   return getTask(db, taskId);
 }
 
-export function sealPlan(db, runId, config = null) {
+function executionSettingsInput(options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) return undefined;
+  if (Object.hasOwn(options, "executionSettings")) return options.executionSettings;
+  if (Object.hasOwn(options, "modelEffort")) return options.modelEffort;
+  if (Object.hasOwn(options, "settings")) return options.settings;
+  const keys = ["host", "model", "selectedModel", "effort", "reasoningEffort", "requestedEffort", "confirmed", "approved", "approvedByUser", "approval", "roles", "tasks", "entries"];
+  return keys.some((key) => Object.hasOwn(options, key)) ? options : undefined;
+}
+
+function normalizeExecutionSetting(value, run, fallbackTaskId = null) {
+  invariant(value && typeof value === "object" && !Array.isArray(value), "PLAN_EXECUTION_SETTINGS_INVALID", "실행 설정은 객체여야 합니다.");
+  const providerFields = ["effectiveEffort", "effective", "effortStatus", "capabilityStatus", "supportedEfforts", "effortSource", "providerConfirmed", "hostConfirmed"];
+  invariant(providerFields.every((key) => !Object.hasOwn(value, key)), "PLAN_EXECUTION_SETTINGS_PROVIDER_FIELDS", "provider가 확인할 effective/support/status는 사용자 승인 입력에 포함할 수 없습니다.");
+  const host = String(value.host ?? run.host ?? "").trim().toLowerCase();
+  invariant(host && host === String(run.host ?? "").trim().toLowerCase(), "PLAN_EXECUTION_SETTINGS_HOST", "승인된 실행 설정의 host가 현재 run과 일치해야 합니다.");
+  const model = String(value.model ?? value.selectedModel ?? value.selection?.model ?? "").trim();
+  invariant(model, "PLAN_EXECUTION_SETTINGS_MODEL", "명시적인 실행 설정에는 사용자가 확인한 model이 필요합니다.");
+  const requestedEffort = String(value.requestedEffort ?? value.reasoningEffort ?? value.effort ?? value.selection?.requestedEffort ?? "").trim().toLowerCase();
+  invariant(EFFORT_ORDER.includes(requestedEffort), "PLAN_EXECUTION_SETTINGS_EFFORT", `지원되지 않는 requested effort: ${requestedEffort}.`);
+  const approval = value.approval && typeof value.approval === "object" ? value.approval : value;
+  invariant(approval.confirmed === true || approval.approved === true || approval.approvedByUser === true,
+    "PLAN_EXECUTION_SETTINGS_CONFIRMATION", "실행 설정은 host 대화에서 사용자가 명시적으로 승인해야 합니다.");
+  const evidence = String(approval.evidence ?? approval.confirmation ?? approval.reason ?? "").trim();
+  return {
+    ...(fallbackTaskId ? { taskId: fallbackTaskId } : {}),
+    host,
+    model,
+    requestedEffort,
+    userApproval: { status: "approved", source: "user", ...(evidence ? { evidence: evidence.slice(0, 500) } : {}) }
+  };
+}
+
+export function normalizePlanExecutionSettings(input, run, executionTasks) {
+  const raw = executionSettingsInput(input);
+  if (raw === undefined) return null;
+  invariant(raw && typeof raw === "object" && !Array.isArray(raw), "PLAN_EXECUTION_SETTINGS_INVALID", "실행 설정은 객체여야 합니다.");
+  const sourceEntries = raw.tasks ?? raw.entries ?? raw.roles;
+  const entries = [];
+  if (Array.isArray(sourceEntries)) {
+    for (const entry of sourceEntries) {
+      const taskId = entry?.taskId ?? entry?.id ?? null;
+      invariant(taskId, "PLAN_EXECUTION_SETTINGS_TASK", "역할별 실행 설정에는 taskId 또는 id가 필요합니다.");
+      entries.push(normalizeExecutionSetting({ ...raw, ...entry }, run, String(taskId)));
+    }
+  } else if (sourceEntries && typeof sourceEntries === "object") {
+    for (const [key, value] of Object.entries(sourceEntries)) {
+      const isTask = executionTasks.some((task) => task.id === key);
+      const taskIds = isTask ? [key] : executionTasks.filter((task) => task.role === key).map((task) => task.id);
+      invariant(taskIds.length > 0, "PLAN_EXECUTION_SETTINGS_TASK", `실행 설정 대상 ${key}를 현재 plan에서 찾을 수 없습니다.`);
+      for (const taskId of taskIds) entries.push(normalizeExecutionSetting({ ...raw, ...(value ?? {}) }, run, taskId));
+    }
+  } else {
+    for (const task of executionTasks) entries.push(normalizeExecutionSetting(raw, run, task.id));
+  }
+  const unique = new Map();
+  for (const entry of entries) {
+    invariant(!unique.has(entry.taskId), "PLAN_EXECUTION_SETTINGS_DUPLICATE", `실행 설정이 task ${entry.taskId}에 중복 지정되었습니다.`);
+    unique.set(entry.taskId, entry);
+  }
+  const expectedIds = new Set(executionTasks.map((task) => String(task.id)));
+  const actualIds = new Set(unique.keys());
+  invariant(unique.size === executionTasks.length
+    && actualIds.size === expectedIds.size
+    && [...expectedIds].every((taskId) => actualIds.has(taskId)),
+  "PLAN_EXECUTION_SETTINGS_TASK_SET", "실행 설정은 현재 plan의 모든 task를 정확히 한 번씩 지정해야 합니다.");
+  return {
+    version: 1,
+    mode: "exact",
+    host: String(run.host ?? "").trim().toLowerCase(),
+    entries: executionTasks.map((task) => unique.get(String(task.id)))
+  };
+}
+
+export function applyPlanExecutionSettings(db, run, tasks, settings, config) {
+  if (!settings) return null;
+  const entries = new Map(settings.entries.map((entry) => [String(entry.taskId), entry]));
+  const routes = [];
+  for (const task of tasks) {
+    const taskId = String(task.id);
+    const requested = entries.get(taskId);
+    invariant(requested, "PLAN_EXECUTION_SETTINGS_TASK_SET", `실행 설정이 task ${taskId}에 없습니다.`);
+    const row = db.prepare("SELECT run_id, status FROM tasks WHERE id = ?").get(taskId);
+    invariant(row?.run_id === run.id, "PLAN_EXECUTION_SETTINGS_TASK", `실행 설정 task ${taskId}가 현재 run에 속하지 않습니다.`);
+    invariant(row.status === "pending", "PLAN_EXECUTION_SETTINGS_TASK_STATE", `실행 설정은 pending task에만 적용할 수 있습니다. (${taskId})`);
+    const route = selectModelRoute(config, task.role, {
+      host: run.host,
+      risk: task.risk,
+      effort: task.effort,
+      capabilities: (task.capabilities ?? []).map((item) => typeof item === "string" ? item : item.name),
+      complexity: task.complexity,
+      modelTier: task.model_tier,
+      model: requested.model,
+      reasoningEffort: requested.requestedEffort,
+      explicitEffortApproval: true
+    });
+    invariant(route.model === requested.model, "PLAN_EXECUTION_SETTINGS_MODEL_UNAVAILABLE", `승인한 model ${requested.model}을 task ${taskId}에 적용할 수 없습니다.`);
+    invariant(route.capabilityStatus !== "unsupported"
+      && route.requestedEffort === requested.requestedEffort
+      && route.effectiveEffort === requested.requestedEffort,
+    "PLAN_EXECUTION_SETTINGS_EFFORT_UNAVAILABLE", `승인한 effort ${requested.requestedEffort}를 task ${taskId}에서 provider가 지원하지 않습니다.`);
+    routes.push({ taskId, requested, route });
+  }
+  return transaction(db, () => {
+    const timestamp = now();
+    const applied = [];
+    for (const { taskId, requested, route } of routes) {
+      const changed = db.prepare(`
+        UPDATE tasks SET model_tier = ?, selected_model = ?, model_source = ?,
+          requested_effort = ?, effective_effort = ?, effort_source = ?,
+          supported_efforts_json = ?, capability_status = ?, reasoning_effort = ?, updated_at = ?
+        WHERE id = ? AND run_id = ? AND status = 'pending'
+      `).run(
+        route.tier, route.model, route.modelSource, route.requestedEffort, route.effectiveEffort,
+        route.effortSource, json(route.supportedEfforts ?? []), route.capabilityStatus ?? "unknown",
+        route.reasoningEffort, timestamp, taskId, run.id
+      );
+      invariant(changed.changes === 1, "PLAN_EXECUTION_SETTINGS_TASK_STATE", `실행 설정 task ${taskId}가 적용 중 pending 상태가 아닙니다.`);
+      applied.push({
+        taskId,
+        model: route.model,
+        requestedEffort: route.requestedEffort,
+        effectiveEffort: route.effectiveEffort,
+        effortStatus: route.capabilityStatus ?? "unknown",
+        effortSource: route.effortSource,
+        supportedEfforts: route.supportedEfforts ?? [],
+        userApproval: requested.userApproval
+      });
+    }
+    return { ...settings, entries: applied };
+  });
+}
+
+export function previousPlanExecutionSettings(db, run) {
+  const rows = db.prepare(`
+    SELECT content_ref FROM artifacts
+    WHERE run_id = ? AND kind = 'plan' AND status IN ('verified', 'waived', 'stale')
+    ORDER BY updated_at DESC
+  `).all(run.id);
+  for (const row of rows) {
+    if (!row.content_ref) continue;
+    try {
+      const parsed = JSON.parse(readObject(db, run.project_root, row.content_ref));
+      if (parsed.executionSettings !== undefined && parsed.executionSettings !== null) return parsed.executionSettings;
+    } catch {
+      // 과거 plan의 승인 흔적은 현재 plan이 손상되어도 재봉인 우회를 허용하지 않는다.
+    }
+  }
+  return null;
+}
+
+export function planExecutionSettings(db, projectRoot, runId) {
+  const run = getRun(db, runId);
+  const historicalSettings = previousPlanExecutionSettings(db, run);
+  const plan = latestArtifact(db, projectRoot ?? run.project_root, run.id, "plan", ["verified"]);
+  if (!plan?.content) {
+    const required = Boolean(historicalSettings || run.route?.executionApprovalRequired === true);
+    return required
+      ? { explicit: false, required: true, invalid: true, settings: null,
+        reason: historicalSettings
+          ? "이전 승인 설정이 있으므로 현재 plan의 새 실행 설정 승인이 필요합니다."
+          : "실행 승인 대상 plan에는 명시적인 실행 설정 승인이 필요합니다.", planHash: null }
+      : { explicit: false, required: false, settings: null, planHash: null };
+  }
+  let content;
+  try {
+    content = JSON.parse(plan.content);
+  } catch {
+    return {
+      explicit: false, required: true, invalid: true, settings: null,
+      reason: "현재 sealed plan을 해석할 수 없어 실행 설정을 확인할 수 없습니다.",
+      planHash: null, planArtifactId: plan.id, planContentRef: plan.content_ref
+    };
+  }
+  const hasSettings = Object.hasOwn(content, "executionSettings");
+  const settings = content.executionSettings ?? null;
+  const entries = Array.isArray(settings?.entries) ? settings.entries : [];
+  const taskIds = Array.isArray(content.tasks) ? content.tasks.map((task) => String(task?.id ?? "")) : [];
+  const entryIds = entries.map((entry) => String(entry?.taskId ?? ""));
+  const hashPayload = { ...content };
+  delete hashPayload.planHash;
+  const hashCurrent = Boolean(content.planHash) && sha256(stableStringify(hashPayload)) === content.planHash;
+  const metadataHashCurrent = !Object.hasOwn(plan.metadata ?? {}, "planHash")
+    || plan.metadata.planHash === content.planHash;
+  const taskSetCurrent = entries.length > 0
+    && taskIds.length === entryIds.length
+    && new Set(taskIds).size === taskIds.length
+    && new Set(entryIds).size === entryIds.length
+    && taskIds.every((taskId) => entryIds.includes(taskId));
+  const approved = settings?.mode === "exact"
+    && entries.length > 0
+    && entries.every((entry) => entry?.userApproval?.status === "approved")
+    && hashCurrent && metadataHashCurrent && taskSetCurrent;
+  if (hasSettings && !approved) {
+    return {
+      explicit: false, required: true, invalid: true, settings,
+      reason: "현재 sealed plan의 실행 설정 승인 또는 plan binding이 유효하지 않습니다.",
+      planHash: content.planHash ?? null, planArtifactId: plan.id, planContentRef: plan.content_ref
+    };
+  }
+  if (!hasSettings && (historicalSettings || run.route?.executionApprovalRequired === true)) {
+    return {
+      explicit: false, required: true, invalid: true, settings: null,
+      reason: historicalSettings
+        ? "이전 승인 설정이 있으므로 현재 plan을 새 실행 설정 승인 없이 실행할 수 없습니다."
+        : "실행 승인 대상 plan에는 명시적인 실행 설정 승인이 필요합니다.",
+      planHash: content.planHash ?? null, planArtifactId: plan.id, planContentRef: plan.content_ref
+    };
+  }
+  return {
+    explicit: approved,
+    required: approved,
+    settings,
+    planHash: content.planHash ?? null,
+    planArtifactId: plan.id,
+    planContentRef: plan.content_ref
+  };
+}
+
+export function planRequiresExactEffort(db, projectRoot, runId) {
+  return planExecutionSettings(db, projectRoot, runId).required;
+}
+
+export function taskPlanExecutionSettingStatus(db, projectRoot, runId, task) {
+  const approval = planExecutionSettings(db, projectRoot, runId);
+  if (!approval.required) return { required: false, pass: true, entry: null };
+  if (approval.invalid) return { required: true, pass: false, entry: null, reason: approval.reason };
+  const entry = approval.settings.entries.find((item) => item?.taskId === task.id);
+  if (!entry) return { required: true, pass: false, reason: `Task ${task.id} has no approved execution setting.` };
+  const current = {
+    model: task.selected_model ?? task.selectedModel ?? null,
+    requestedEffort: task.requested_effort ?? task.requestedEffort ?? task.reasoning_effort ?? null,
+    effectiveEffort: task.effective_effort ?? task.effectiveEffort ?? task.reasoning_effort ?? null,
+    effortStatus: task.capability_status ?? task.capabilityStatus ?? "unknown",
+    effortSource: task.effort_source ?? task.effortSource ?? null,
+    supportedEfforts: parseJson(task.supported_efforts_json, task.supportedEfforts ?? [])
+  };
+  const sameList = stableStringify(current.supportedEfforts) === stableStringify(entry.supportedEfforts ?? []);
+  const pass = current.model === entry.model
+    && String(current.requestedEffort ?? "").toLowerCase() === String(entry.requestedEffort ?? "").toLowerCase()
+    && String(current.effectiveEffort ?? "").toLowerCase() === String(entry.effectiveEffort ?? "").toLowerCase()
+    && String(current.effortStatus ?? "").toLowerCase() === String(entry.effortStatus ?? "").toLowerCase()
+    && current.effortSource === entry.effortSource
+    && sameList;
+  return {
+    required: true,
+    pass,
+    entry,
+    current,
+    reason: pass ? null : `Task ${task.id} no longer matches the approved execution setting.`
+  };
+}
+
+export function sealPlan(db, runId, config = null, options = {}) {
+  return transaction(db, () => sealPlanInTransaction(db, runId, config, options));
+}
+
+function sealPlanInTransaction(db, runId, config = null, options = {}) {
   const run = getRun(db, runId);
   invariant(run.phase === "plan", "PLAN_SEAL_PHASE", "Reopen the plan phase before sealing or resealing a plan.");
   const effectiveConfig = config ?? loadConfig(run.project_root);
   const executionTasks = listTasks(db, runId)
     .filter((task) => ["execute", "review", "verify", "curate"].includes(task.phase));
   invariant(executionTasks.length > 0, "PLAN_TASKS_REQUIRED", "The execution plan needs at least one task.");
+  const suppliedSettings = normalizePlanExecutionSettings(options, run, executionTasks);
+  const previousSettings = previousPlanExecutionSettings(db, run);
+  invariant(!previousSettings || suppliedSettings, "PLAN_EXECUTION_SETTINGS_REAPPROVAL", "이전 승인 설정이 있는 plan을 다시 봉인하려면 새 실행 설정 승인이 필요합니다.");
+  invariant(run.route?.executionApprovalRequired !== true || suppliedSettings,
+    "PLAN_EXECUTION_SETTINGS_REQUIRED", "실행 승인 대상 plan을 봉인하려면 명시적인 실행 설정 승인이 필요합니다.");
+  const appliedSettings = applyPlanExecutionSettings(db, run, executionTasks, suppliedSettings, effectiveConfig);
+  const sealedExecutionTasks = appliedSettings
+    ? listTasks(db, runId).filter((task) => ["execute", "review", "verify", "curate"].includes(task.phase))
+    : executionTasks;
   const milestoneCount = Number(db.prepare("SELECT COUNT(*) AS count FROM milestones WHERE run_id = ?").get(runId).count);
   if (milestoneCount === 0) {
     invariant(
@@ -2140,9 +2646,7 @@ export function sealPlan(db, runId, config = null) {
   }
   const graph = validateGraph(db, runId);
   const milestoneGraph = validateMilestoneGraph(db, runId);
-  const tasks = listTasks(db, runId)
-    .filter((task) => ["execute", "review", "verify", "curate"].includes(task.phase))
-    .map((task) => ({
+  const tasks = sealedExecutionTasks.map((task) => ({
       id: task.id,
       milestoneId: task.milestone_id,
       parentTaskId: task.parent_task_id,
@@ -2164,7 +2668,12 @@ export function sealPlan(db, runId, config = null) {
       capabilities: task.capabilities.map((item) => item.name),
       modelTier: task.model_tier,
       model: task.selected_model,
-      reasoningEffort: task.reasoning_effort
+      reasoningEffort: task.reasoning_effort,
+      requestedEffort: task.requestedEffort,
+      effectiveEffort: task.effectiveEffort,
+      effortStatus: task.capabilityStatus,
+      effortSource: task.effortSource,
+      supportedEfforts: task.supportedEfforts
     }));
   const milestones = listMilestones(db, runId).map((milestone) => ({
     id: milestone.id,
@@ -2187,7 +2696,8 @@ export function sealPlan(db, runId, config = null) {
     graph,
     milestoneGraph,
     milestones,
-    tasks
+    tasks,
+    ...(appliedSettings ? { executionSettings: appliedSettings } : {})
   };
   const planHash = sha256(stableStringify(payload));
   return { graph, milestoneGraph, milestones, tasks, planHash, content: { ...payload, planHash } };

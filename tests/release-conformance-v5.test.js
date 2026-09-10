@@ -33,9 +33,9 @@ test("generated reference and structural validation stay current", () => {
   execFileSync(process.execPath, ["scripts/validate.mjs"], { cwd: root, stdio: "pipe" });
 });
 
-test("package release uses the canonical 1.1.0 metadata", () => {
+test("package release uses the canonical 1.2.0 metadata", () => {
   const pkg = readJson("package.json");
-  assert.equal(pkg.version, "1.1.0");
+  assert.equal(pkg.version, "1.2.0");
   assert.equal(pkg.author, "Austin");
   assert.equal(pkg.engines.node, ">=22.16.0");
   assert.deepEqual(pkg.os, ["darwin", "linux"]);
@@ -44,7 +44,8 @@ test("package release uses the canonical 1.1.0 metadata", () => {
   assert.equal(pkg.bugs.url, "https://github.com/gkrtjd99/Metis/issues");
   assert.equal(pkg.homepage, "https://github.com/gkrtjd99/Metis#readme");
   assert.equal(pkg.scripts.prepublishOnly, "npm run check");
-  assert.match(read("CHANGELOG.md"), /^## 1\.1\.0 - (?:Unreleased|\d{4}-\d{2}-\d{2})$/m);
+  assert.match(read("CHANGELOG.md"), /^## 1\.2\.0 - (?:Unreleased|\d{4}-\d{2}-\d{2})$/m);
+  assert.match(read("CHANGELOG.md"), /^## 1\.1\.0 - 2026-09-07$/m);
   assert.match(read("CHANGELOG.md"), /^## 1\.0\.1 - 2026-08-15$/m);
   const lock = readJson("package-lock.json");
   assert.equal(lock.version, pkg.version);
@@ -111,7 +112,7 @@ test("managed-goal capabilities stay internal while model configuration has its 
   assert.match(read("skills/model/SKILL.md"), /Do not estimate or display cost/);
 });
 
-test("packed archive contains the 1.1.0 orchestration and runs public entrypoint and CLI smoke", () => {
+test("packed archive contains the 1.2.0 orchestration and runs public entrypoint and CLI smoke", () => {
   const tempRoot = mkdtempSync(path.join(os.tmpdir(), "metis-release-"));
   try {
     const output = execFileSync("npm", ["pack", "--json", "--pack-destination", tempRoot], {

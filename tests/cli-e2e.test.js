@@ -56,7 +56,21 @@ function task(id, role, phase, extra = {}) {
     dependsOn: extra.dependsOn ?? [],
     interfaceInputs: [],
     interfaceOutputs: [],
-    verificationModes: extra.verificationModes ?? [],
+    verificationModes: extra.verificationModes ?? (
+      role === "worker" ? ["test"]
+        : ["verifier", "adversarial-reviewer"].includes(role) ? ["semantic"]
+          : []
+    ),
+    risk: extra.risk ?? "medium",
+    effort: extra.effort ?? "small",
+    sliceType: extra.sliceType ?? (
+      role === "worker" ? "vertical"
+        : role === "verifier" ? "verification"
+          : role === "adversarial-reviewer" ? "review"
+            : role === "curator" ? "curation" : "review"
+    ),
+    nonGoals: extra.nonGoals ?? ["Do not modify unrelated paths."],
+    constraints: extra.constraints ?? ["Preserve the frozen task interface."],
     milestoneId: "M-VALUE",
     reviewKind: extra.reviewKind
   };
@@ -279,6 +293,15 @@ test("CLI completes an explicitly routed managed lifecycle and cleanup preview",
       Decisions: [],
       Findings: [],
       Summary: "The current source exports value and passes syntax validation.",
+      AcceptanceResults: [{
+        criterion: "Verify the current export",
+        status: "passed",
+        EvidenceRefs: [{
+          type: "artifact",
+          id: reviewerContract.SubjectArtifact.id,
+          contentRef: reviewerContract.SubjectArtifact.contentRef
+        }]
+      }],
       EvidenceRefs: [{
         type: "artifact",
         id: reviewerContract.SubjectArtifact.id,

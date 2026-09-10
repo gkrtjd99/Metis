@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { budgetStatus } from "../src/core/budget.js";
 import { nextControllerAction } from "../src/core/controller.js";
-import { abortScheduleBatch, acknowledgeScheduleSpawn, claimSchedule, heartbeatScheduleBatch, refreshScheduleBatch } from "../src/core/scheduler.js";
+import { abortScheduleBatch, acknowledgeScheduleSpawn, claimSchedule, heartbeatScheduleBatch, proposeSchedule, refreshScheduleBatch } from "../src/core/scheduler.js";
 import { addTask, claimTask } from "../src/core/tasks.js";
 import { takeoverController } from "../src/core/ownership.js";
+import { putArtifact } from "../src/core/state.js";
+import { sha256, stableStringify } from "../src/core/util.js";
 import { forcePhase, makeProject, spawnReceipts, startTestRun } from "./helpers.js";
 
 const url = (relative) => pathToFileURL(path.resolve(relative)).href;
@@ -134,6 +137,82 @@ function parentRaceProject(configOverrides = {}) {
   claimTask(db, started.run.id, "coordinator-b", "coordinator-b", config);
   return { root, db, config, ...started };
 }
+
+test("direct task claims enforce the project Codex concurrency cap", () => {
+  const { root, db, config } = makeProject({
+    config: {
+      host: "codex",
+      orchestration: { maxConcurrent: 8 },
+      delegation: { requireReadyTaskPacket: false }
+    }
+  });
+  try {
+    mkdirSync(path.join(root, ".codex"));
+    writeFileSync(path.join(root, ".codex", "config.toml"), "[features.multi_agent_v2]\nenabled = true\nmax_concurrent_threads_per_session = 4\n");
+    const { run } = startTestRun(db, root, config, "Direct task host concurrency cap");
+    forcePhase(db, root, config, run.id, "plan");
+    for (let index = 1; index <= 5; index += 1) addTask(db, run.id, task(`direct-cap-${index}`, "worker"), config);
+    forcePhase(db, root, config, run.id, "execute");
+    for (let index = 1; index <= 4; index += 1) claimTask(db, run.id, `direct-cap-${index}`, `direct-cap-${index}`, config);
+    assert.throws(
+      () => claimTask(db, run.id, "direct-cap-5", "direct-cap-5", config),
+      (error) => error?.code === "CONCURRENCY_LIMIT"
+    );
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE run_id = ? AND status = 'running'").get(run.id).count, 4);
+  } finally {
+    db.close();
+  }
+});
+
+test("scheduler proposal honors the sealed plan desired width after existing work", () => {
+  const { root, db, config } = makeProject({
+    config: {
+      host: "codex",
+      orchestration: { maxConcurrent: 8 },
+      delegation: { requireReadyTaskPacket: false }
+    }
+  });
+  const { run } = startTestRun(db, root, config, "Desired execution width");
+  forcePhase(db, root, config, run.id, "plan");
+  try {
+    const taskIds = ["desired-width-1", "desired-width-2", "desired-width-3"];
+    for (const id of taskIds) addTask(db, run.id, task(id, "worker"), config);
+    const planDraft = {
+      source: "bounded-fast-path-v2",
+      plannedTaskIds: taskIds,
+      parallelism: {
+        eligible: true,
+        independentSlices: 3,
+        desiredWidth: 2,
+        minimumSameWaveImplementationTasks: 2,
+        rationale: "Three independent execution slices request a width of two."
+      }
+    };
+    putArtifact(db, root, run.id, "plan", { tasks: taskIds.map((id) => ({ id })), planDraft }, {
+      status: "verified",
+      metadata: {
+        source: "bounded-fast-path-v2",
+        planDraftHash: sha256(stableStringify(planDraft))
+      }
+    });
+    forcePhase(db, root, config, run.id, "execute");
+    claimTask(db, run.id, taskIds[0], taskIds[0], config);
+    const proposal = proposeSchedule(db, root, run.id, config, { limit: 8 });
+    assert.equal(proposal.batch.length, 1);
+    assert.equal(proposal.batch[0].taskId, taskIds[1]);
+    claimTask(db, run.id, taskIds[1], taskIds[1], config);
+    assert.equal(proposeSchedule(db, root, run.id, config, { limit: 8 }).batch.length, 0);
+    assert.throws(
+      () => claimTask(db, run.id, taskIds[2], taskIds[2], config),
+      (error) => error?.code === "DESIRED_WIDTH_LIMIT"
+    );
+    const unclaimed = db.prepare("SELECT status, attempts FROM tasks WHERE id = ?").get(taskIds[2]);
+    assert.equal(unclaimed.status, "pending");
+    assert.equal(unclaimed.attempts, 0);
+  } finally {
+    db.close();
+  }
+});
 
 test("concurrent parent claims atomically enforce the global concurrency limit", async () => {
   const { root, db, run, controller } = parentRaceProject({ orchestration: { maxConcurrent: 4 } });

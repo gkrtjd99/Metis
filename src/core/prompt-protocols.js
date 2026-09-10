@@ -46,12 +46,15 @@ export const ROLE_PROTOCOLS = Object.freeze({
     "Convert the approved design into milestones, frozen interfaces, and a task DAG.",
     "Use one independently verifiable outcome per task.",
     "Separate mutable ownership and maximize safe parallel work.",
+    "Before setting parallelism counts, enumerate every implementation and verification slice by task ID. For each slice state its domain-specific outcome, owner role and parent owner, exact canonical target paths, linked requirement IDs, slice-specific acceptance criteria, verification modes, required evidence, dependencies, frozen interface inputs/outputs, risk, effort, and why it is independent or remains coupled.",
+    "Never delegate a generic role-only task such as implementation or verification. Each task title and goal must identify the concrete behavior, artifact, or boundary it owns.",
     "Always return PlanDraft.parallelism with eligible, independentSlices, desiredWidth, minimumSameWaveImplementationTasks, and an evidence-based rationale.",
-    "Set desiredWidth to min(host capacity, safe independent slices, remaining spawn budget); explain any coupling that prevents use of safe capacity.",
+    "task 경계는 독립 산출물과 검증 기준으로 정하고 동시 실행 한도는 scheduler에 맡긴다. host 슬롯을 채우려고 분해하지 않는다. desiredWidth는 안전한 독립 작업 수 이내의 희망 실행 폭이며 host 한도에 맞춰 task graph를 축소하지 않는다.",
     PLAN_DRAFT_PROTOCOL,
-    "When the approved design exposes at least four independently verifiable, non-overlapping mutable slices, emit at least four mutually task- and milestone-dependency-independent worker or integrator execute tasks in the same earliest execution wave so they are actually concurrently runnable.",
+    "독립적으로 완료·검증 가능한 작업만 분해하며 실제 task·milestone 의존성을 보존한다. 최소 네 task나 네 파일을 분해 기준으로 사용하지 않는다.",
     "Give same-wave implementation tasks non-empty canonical exclusive targetPaths and independent non-duplicated acceptance criteria.",
-    "Set eligible false only for genuinely atomic or smaller-scope work: do not hide four independent non-overlapping mutable slices or bundle four or more canonical mutable target paths into one task; one to three intentionally coupled paths may remain atomic with a concrete rationale.",
+    "Every mutable implementation slice must have a downstream read-only verifier connected by a dependency path and sharing the relevant requirement; a verifier must declare its own acceptance criteria, modes, and evidence boundary.",
+    "결합된 변경은 수정 경로 수와 무관하게 원자적 작업으로 유지할 수 있다. 분해·미분해 근거에 산출물, 검증 기준, 의존성과 조정 비용을 명시한다.",
     "Never use eligible false to override an explicit design or requirement for parallel fan-out.",
     "Do not implement code or write worker prompts."
   ],
@@ -60,6 +63,7 @@ export const ROLE_PROTOCOLS = Object.freeze({
     "Attack the exact sealed plan and compiled task packets.",
     "Find missing requirements, invalid dependencies, overlapping ownership, weak boundaries, and missing verification.",
     "Check that every dispatched task is self-contained.",
+    "분해·미분해 근거를 검토하고 독립 산출물 없는 과분해나 검증 경계를 숨긴 과소분해를 Findings로 지적한다. host 동시 실행 슬롯 수를 task 개수의 근거로 인정하지 않는다. 필요한 전문 검토와 구현 task 분해는 별도로 판단한다.",
     "When SubjectArtifact is supplied, a COMPLETED result must include its exact typed EvidenceRef: {type:'artifact', id, contentRef}.",
     "Do not implement or repair the plan."
   ],
@@ -77,6 +81,10 @@ export const ROLE_PROTOCOLS = Object.freeze({
   ],
   coordinator: [
     "Coordinate only the declared child subtree.",
+    "Preserve the sealed slice IDs and boundaries exactly; dispatch and report by named slice, never by a generic implementation or verification role.",
+    "Before dispatch, inspect each child's target paths, exact scope, non-goals, constraints, dependencies, interface inputs/outputs, acceptance criteria, verification modes, required evidence, risk, and stop conditions.",
+    "If a child packet lacks a concrete boundary, do not dispatch it; escalate a scope blocker to Main.",
+    "Every mutable child must map to a dependency-linked read-only verifier. Do not finish until every acceptance criterion has current criterion-level evidence and worker/verifier receipts are distinct.",
     "Keep child transcripts and raw output outside the parent context.",
     "Reconcile results in dependency order.",
     "Return compact steering, conflicts, and evidence references."
@@ -136,6 +144,8 @@ export const ROLE_PROTOCOLS = Object.freeze({
   ],
   verifier: [
     "Verify acceptance criteria with current independent evidence.",
+    "Return exactly one AcceptanceResults entry for every acceptance criterion, with a current typed source, command, check, browser, or artifact evidence reference for every verified criterion.",
+    "Do not replace criterion-level evidence with a worker summary, owner statement, build success, or generic note.",
     "Do not modify implementation files.",
     "Do not treat a build or worker claim as behavioral proof.",
     "When SubjectArtifact is supplied, a COMPLETED result must include its exact typed EvidenceRef: {type:'artifact', id, contentRef}.",
@@ -206,7 +216,7 @@ export function resultSchemaForRole(role) {
     PlanDraft: {
       parallelism: {
         eligible: false,
-        minimumSameWaveImplementationTasks: 4,
+        minimumSameWaveImplementationTasks: 2,
         independentSlices: 1,
         desiredWidth: 1,
         rationale: ""
@@ -277,6 +287,7 @@ export function renderTaskPacketPrompt(packet) {
     section("EXECUTION STEPS", packet.ExecutionSteps),
     section("ACCEPTANCE CRITERIA", packet.AcceptanceCriteria),
     section("VERIFICATION PLAN", packet.VerificationPlan),
+    section("REQUIRED EVIDENCE", packet.RequiredEvidence),
     section("REQUIRED OUTPUTS", packet.ExpectedOutputs),
     section("AUTHORITY", packet.Authority),
     section("STOP CONDITIONS", packet.StopConditions),

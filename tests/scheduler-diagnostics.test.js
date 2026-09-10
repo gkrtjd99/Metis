@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import { main } from "../src/cli.js";
 import { nextControllerAction } from "../src/core/controller.js";
@@ -38,6 +40,36 @@ function addRunnableTask(db, run, config, id, wave = 1, options = {}) {
     dependsOn: []
   }, config);
 }
+
+test("scheduler applies the project Codex cap but does not apply it to Claude", () => {
+  for (const host of ["codex", "claude"]) {
+    const { root, db, config } = makeProject({
+      config: {
+        host,
+        orchestration: { maxConcurrent: 8 },
+        delegation: { requireReadyTaskPacket: false }
+      }
+    });
+    try {
+      mkdirSync(path.join(root, ".codex"));
+      writeFileSync(path.join(root, ".codex", "config.toml"), "[features.multi_agent_v2]\nenabled = true\nmax_concurrent_threads_per_session = 4\n");
+      const { run, controller } = startTestRun(db, root, config, `Host cap ${host}`);
+      forcePhase(db, root, config, run.id, "plan");
+      for (let index = 0; index < 8; index += 1) addRunnableTask(db, run, config, `host-cap-${host}-${index}`);
+      forcePhase(db, root, config, run.id, "execute");
+      const proposal = proposeSchedule(db, root, run.id, config, { limit: 8 });
+      assert.equal(proposal.batch.length, host === "codex" ? 4 : 8);
+      const claimed = claimSchedule(db, root, run.id, config, {
+        owner: `host-cap-${host}`,
+        controllerFencingToken: controller.fencingToken,
+        limit: 8
+      });
+      assert.equal(claimed.batch.length, host === "codex" ? 4 : 8);
+    } finally {
+      db.close();
+    }
+  }
+});
 
 test("batch preparation reports one serialized lane while preserving four- or eight-item host fanout", () => {
   assert.equal(SCHEDULER_PREPARATION_CONCURRENCY, 1);

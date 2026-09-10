@@ -1,6 +1,7 @@
 import { transaction } from "./db.js";
 import { MetisError, invariant } from "./errors.js";
 import { normalizeEvidenceRefs } from "./provenance.js";
+import { readObject } from "./objects.js";
 import { getRun, putArtifact, recordEvent, touchRun } from "./state.js";
 import { asArray, json, makeId, now, sha256, stableStringify } from "./util.js";
 import { REQUIREMENT_KINDS as REQUIREMENT_KIND_LIST } from "./metadata.js";
@@ -33,6 +34,8 @@ function hasEntries(value) {
 }
 
 function validateRoute(route) {
+  invariant(!Object.hasOwn(route, "executionApprovalRequired") || typeof route.executionApprovalRequired === "boolean",
+    "CONTRACT_EXECUTION_APPROVAL_BOOLEAN", "route.executionApprovalRequired는 boolean이어야 합니다.");
   for (const field of OBSOLETE_ROUTE_FIELDS) {
     invariant(!Object.hasOwn(route, field), "CONTRACT_OBSOLETE_ROUTE_FIELD", `Route field ${field} is obsolete; lifecycleProfile controls mandatory review gates.`);
   }
@@ -131,6 +134,22 @@ export function selectLifecycleProfile(input = {}, complexity, requirements = []
   return { lifecycleProfile: "balanced", lifecycleProfileReasons: reasons, signals };
 }
 
+export function validateSourceDocument(db, projectRoot, runId, sourceDocument) {
+  if (sourceDocument === undefined || sourceDocument === null) return null;
+  invariant(typeof sourceDocument === "object" && !Array.isArray(sourceDocument)
+    && typeof sourceDocument.artifactId === "string" && typeof sourceDocument.contentRef === "string"
+    && Object.keys(sourceDocument).every((key) => ["artifactId", "contentRef"].includes(key)),
+  "CONTRACT_SOURCE_DOCUMENT", "sourceDocument는 artifactId와 contentRef만 포함해야 합니다.");
+  const { artifactId, contentRef } = sourceDocument;
+  const artifact = db.prepare("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND kind = 'prd' AND status = 'verified'").get(artifactId, runId);
+  invariant(artifact && artifact.content_ref === contentRef, "CONTRACT_SOURCE_DOCUMENT_BINDING", "현재 run의 verified PRD artifact와 정확한 contentRef가 필요합니다.");
+  const content = readObject(db, projectRoot, contentRef);
+  invariant(content !== null && `obj_${sha256(content)}` === contentRef,
+    "CONTRACT_SOURCE_DOCUMENT_INTEGRITY", "PRD 원본 object의 무결성을 확인할 수 없습니다.");
+  // 원문은 지시로 실행하지 않고 인증된 참조만 계약에 보존합니다.
+  return { artifactId, contentRef };
+}
+
 function normalizeRoute(input, complexity, requirements, scope) {
   const route = input?.route && typeof input.route === "object" && !Array.isArray(input.route) ? input.route : {};
   const selected = selectLifecycleProfile({ ...input, route }, complexity, requirements, scope);
@@ -138,6 +157,8 @@ function normalizeRoute(input, complexity, requirements, scope) {
   return {
     lifecycleProfile,
     lifecycleProfileReasons,
+    ...(Object.hasOwn(route, "executionApprovalRequired") ? { executionApprovalRequired: route.executionApprovalRequired } : {}),
+    ...(Object.hasOwn(route, "sourceDocument") ? { sourceDocument: route.sourceDocument } : {}),
     researchRequired: lifecycleProfile === "full" || (lifecycleProfile === "balanced" && signals.externalCurrentFact),
     designRequired: lifecycleProfile === "full" || (lifecycleProfile === "balanced" && signals.sharedInterfaceDecision),
     specialistReviewRequired: lifecycleProfile === "full" && (route.specialistReviewRequired ?? complexity === "complex"),
@@ -255,6 +276,7 @@ function upsertRequirements(db, runId, requirements) {
 }
 
 function storeContract(db, projectRoot, run, contract, options = {}) {
+  validateSourceDocument(db, projectRoot, run.id, contract.route.sourceDocument);
   const timestamp = now();
   const id = makeId("contract");
   transaction(db, () => {
@@ -313,7 +335,13 @@ export function freezeGoalContract(db, projectRoot, runId, input) {
   const run = getRun(db, runId);
   invariant(run.phase === "intake", "CONTRACT_PHASE", "Freeze the goal contract during intake.");
   invariant(!activeContractRow(db, run.id), "CONTRACT_EXISTS", "The goal contract is already frozen. Use contract amend.");
-  const contract = normalizeContract(run, input, 1);
+  if (input.route && typeof input.route === "object") validateRoute(input.route);
+  invariant(run.route.executionApprovalRequired !== true || input.route?.executionApprovalRequired !== false,
+    "CONTRACT_EXECUTION_APPROVAL_REQUIRED", "계획 전용 시작 요청은 계약에서 해제할 수 없습니다.");
+  const contract = normalizeContract(run, {
+    ...input,
+    route: { ...input.route, ...(run.route.executionApprovalRequired === true ? { executionApprovalRequired: true } : {}) }
+  }, 1);
   return storeContract(db, projectRoot, run, contract, { approvedByUser: true });
 }
 
@@ -388,6 +416,9 @@ export function amendGoalContract(db, projectRoot, runId, input) {
     invariant(current, "CONTRACT_MISSING", "Freeze the goal contract before amending it.");
     const reason = String(input.reason ?? "").trim();
     invariant(reason, "CONTRACT_AMEND_REASON", "A goal amendment needs a reason.");
+    if (input.route && typeof input.route === "object") validateRoute(input.route);
+    invariant(current.route.executionApprovalRequired !== true || input.route?.executionApprovalRequired !== false,
+      "CONTRACT_EXECUTION_APPROVAL_REQUIRED", "계획 전용 실행 승인은 계약 변경으로 해제할 수 없습니다.");
     const merged = {
       objective: input.objective ?? current.objective,
       scope: input.scope ?? current.scope,
@@ -395,7 +426,12 @@ export function amendGoalContract(db, projectRoot, runId, input) {
       constraints: input.constraints ?? current.constraints,
       successCriteria: input.successCriteria ?? current.successCriteria,
       complexity: input.complexity ?? current.complexity,
-      route: input.route ?? current.route,
+      route: {
+        ...(input.route ?? current.route),
+        ...(current.route.executionApprovalRequired === true ? { executionApprovalRequired: true } : {}),
+        ...(!Object.hasOwn(input.route ?? {}, "sourceDocument") && Object.hasOwn(current.route, "sourceDocument")
+          ? { sourceDocument: current.route.sourceDocument } : {})
+      },
       requirements: input.requirements ?? listRequirements(db, run.id).filter((item) => item.status !== "superseded").map((item) => ({
         id: item.id,
         title: item.title,

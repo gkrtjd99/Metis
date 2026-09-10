@@ -65,7 +65,7 @@ test("eligible fast path materializes bounded canonical records and remains idem
     const result = materializeFastPathPrerequisites(db, root, started.run.id, started.controller, config);
     assert.equal(result.run.phase, "plan");
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM artifacts WHERE run_id = ? AND id LIKE 'fast-path-%'").get(started.run.id).count, 5);
-    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE run_id = ? AND id LIKE 'fast-path-%'").get(started.run.id).count, 5);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE run_id = ? AND id LIKE 'fast-path-%'").get(started.run.id).count, 2);
     const repeated = materializeFastPathPrerequisites(db, root, started.run.id, started.controller, config);
     assert.equal(repeated.taskId, result.taskId);
     assert.equal(nextControllerAction(db, root, started.run.id, config, { sampleProgress: false }).type, "ADVANCE_PHASE");
@@ -100,11 +100,11 @@ test("generated fast-path plan passes lint and preserves every later lifecycle t
     const lint = lintPlan(db, started.run.id, config, root);
     assert.equal(lint.verdict, "APPROVED", JSON.stringify(lint.findings));
     const result = materializeFastPathPrerequisites(db, root, started.run.id, started.controller, config);
-    const [implementationId, integrationReviewId, verificationId, adversarialReviewId, curationId] = result.taskIds;
+    const [implementationId, verificationId] = result.taskIds;
     const tasks = listTasks(db, started.run.id);
     const reviewRow = db.prepare("SELECT content_ref FROM artifacts WHERE id = ?").get(result.artifactIds[4]);
     const deterministicReview = JSON.parse(reviewRow.content_ref ? readObject(db, root, reviewRow.content_ref) : "{}");
-    assert.equal(deterministicReview.source, "bounded-fast-path");
+    assert.equal(deterministicReview.source, "bounded-fast-path-v2");
     assert.equal(deterministicReview.deterministic, true);
     assert.equal(deterministicReview.verdict, "APPROVED");
     assert.equal(deterministicReview.packetBindings.length, result.taskIds.length);
@@ -114,44 +114,23 @@ test("generated fast-path plan passes lint and preserves every later lifecycle t
     )));
     const reviewMetadata = JSON.parse(db.prepare("SELECT metadata_json FROM artifacts WHERE id = ?").get(result.artifactIds[4]).metadata_json);
     assert.deepEqual(reviewMetadata.packetBindings, deterministicReview.packetBindings);
-    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE run_id = ? AND role = 'plan-critic'").get(started.run.id).count, 0);
-    assert.equal(tasks.some((task) => task.role === "plan-critic"), false);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE run_id = ? AND role IN ('reviewer','adversarial-reviewer','curator','plan-critic')").get(started.run.id).count, 0);
     assert.ok(db.prepare("SELECT capabilities_json FROM tasks WHERE run_id = ?").all(started.run.id)
       .every((row) => Array.isArray(JSON.parse(row.capabilities_json))));
     assert.deepEqual(tasks.map((task) => [task.id, task.role, task.phase, task.readOnly, task.dependsOn]), [
       [implementationId, "worker", "execute", false, []],
-      [integrationReviewId, "reviewer", "review", true, [implementationId]],
-      [verificationId, "verifier", "review", true, [implementationId]],
-      [adversarialReviewId, "adversarial-reviewer", "verify", true, [integrationReviewId, verificationId]],
-      [curationId, "curator", "curate", true, [adversarialReviewId]]
+      [verificationId, "verifier", "review", true, [implementationId]]
     ]);
-
-    const mandatory = new Map([
-      [integrationReviewId, "NO_INTEGRATION_REVIEW"],
-      [verificationId, "NO_VERIFIER_TASK"],
-      [adversarialReviewId, "NO_ADVERSARIAL_REVIEW"],
-      [curationId, "NO_CURATOR_TASK"]
-    ]);
-    for (const [taskId, findingCode] of mandatory) {
-      db.exec("SAVEPOINT fast_path_required");
-      db.prepare("DELETE FROM tasks WHERE id = ?").run(taskId);
-      assert.ok(lintPlan(db, started.run.id, config).findings.some((finding) => finding.code === findingCode));
-      db.exec("ROLLBACK TO fast_path_required");
-      db.exec("RELEASE fast_path_required");
-    }
 
     advancePhase(db, root, started.run.id, "execute");
     assert.deepEqual(getRunnableTasks(db, started.run.id, 10).map((task) => task.id), [implementationId]);
     const reviewGate = gateReport(db, root, started.run.id, "review");
     assert.equal(reviewGate.pass, false);
     assert.match(reviewGate.failures.join("\n"), new RegExp(`${implementationId}:pending`));
-    assert.ok(listTasks(db, started.run.id).filter((task) => ["review", "verify", "curate"].includes(task.phase)).every((task) => task.status === "pending"));
+    assert.equal(listTasks(db, started.run.id).find((task) => task.id === verificationId).status, "pending");
     db.prepare("UPDATE tasks SET status = 'completed' WHERE id = ?").run(implementationId);
     advancePhase(db, root, started.run.id, "review");
-    assert.deepEqual(
-      getRunnableTasks(db, started.run.id, 10).map((task) => task.id).sort(),
-      [integrationReviewId, verificationId].sort()
-    );
+    assert.deepEqual(getRunnableTasks(db, started.run.id, 10).map((task) => task.id), [verificationId]);
   } finally { db.close(); }
 });
 
@@ -177,34 +156,36 @@ test("deterministic fast plan approval blocks execute when a bound packet drifts
   }
 });
 
-test("parallel fast review tasks are bound to one immutable integration candidate", () => {
+test("fast-v2 verifier is bound to one immutable integration candidate", () => {
   const { root, db, config } = fastProject({ requirePlanCritic: false });
-  let reviewerClaim = null;
+  let verifierClaim = null;
   try {
     const started = startRun(db, root, config, "Update the local parser");
     fastContract(db, root, started.run.id, { scope: ["src/parser.js"] });
     db.prepare("UPDATE runs SET phase = 'discover', revision = revision + 1 WHERE id = ?").run(started.run.id);
     const result = materializeFastPathPrerequisites(db, root, started.run.id, started.controller, config);
-    const [implementationId, integrationReviewId, verificationId] = result.taskIds;
+    const [implementationId, verificationId] = result.taskIds;
     advancePhase(db, root, started.run.id, "execute");
     db.prepare("UPDATE tasks SET status = 'completed' WHERE id = ?").run(implementationId);
     advancePhase(db, root, started.run.id, "review");
 
-    reviewerClaim = claimTask(db, started.run.id, integrationReviewId, "reviewer", config);
-    assert.equal(reviewerClaim.contract.SubjectArtifact.kind, "integration-candidate");
-    const candidate = reviewerClaim.contract.SubjectArtifact;
+    verifierClaim = claimTask(db, started.run.id, verificationId, "verifier", config);
+    assert.equal(verifierClaim.contract.SubjectArtifact.kind, "integration-candidate");
+    const candidate = verifierClaim.contract.SubjectArtifact;
     const verifierCandidate = db.prepare("SELECT id, content_ref FROM artifacts WHERE run_id = ? AND kind = 'integration-candidate' AND status = 'verified'").get(started.run.id);
     assert.deepEqual([candidate.id, candidate.contentRef], [verifierCandidate.id, verifierCandidate.content_ref]);
 
     mkdirSync(`${root}/src`, { recursive: true });
     writeFileSync(`${root}/src/parser.js`, "export const parser = 'changed-after-freeze';\n");
+    assert.equal(db.prepare("SELECT status FROM artifacts WHERE id = ?").get(candidate.id).status, "verified");
+    releaseTaskClaim(db, root, verifierClaim.task.id, verifierClaim.attemptFence, "test-retry");
+    verifierClaim = null;
     assert.throws(
       () => claimTask(db, started.run.id, verificationId, "verifier", config),
-      /integration[- ]candidate|TASK_SUBJECT_ARTIFACT_REQUIRED|TASK_INTEGRATION_CANDIDATE_STALE/i
+      /already claimed|lease|current ready packet|integration[- ]candidate|TASK_SUBJECT_ARTIFACT_REQUIRED|TASK_INTEGRATION_CANDIDATE_STALE/i
     );
-    assert.equal(db.prepare("SELECT status FROM artifacts WHERE id = ?").get(candidate.id).status, "stale");
   } finally {
-    if (reviewerClaim) releaseTaskClaim(db, root, reviewerClaim.task.id, reviewerClaim.attemptFence, "test-cleanup");
+    if (verifierClaim) releaseTaskClaim(db, root, verifierClaim.task.id, verifierClaim.attemptFence, "test-cleanup");
     db.close();
   }
 });

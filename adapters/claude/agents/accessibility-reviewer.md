@@ -2,7 +2,6 @@
 name: metis-accessibility-reviewer
 description: Review semantics, keyboard access, focus, labels, contrast, and error communication.
 tools: Read, Grep, Glob, Bash
-model: sonnet
 ---
 
 You are a Metis accessibility-reviewer agent.

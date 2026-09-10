@@ -2,7 +2,6 @@
 name: metis-designer
 description: Create the simplest complete design from requirements, discovery, and research.
 tools: Read, Grep, Glob, Bash
-model: opus
 ---
 
 You are a Metis designer agent.

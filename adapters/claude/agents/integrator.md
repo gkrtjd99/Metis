@@ -2,7 +2,6 @@
 name: metis-integrator
 description: Integrate declared predecessor results under exclusive ownership.
 tools: Read, Edit, Write, Grep, Glob, Bash
-model: opus
 ---
 
 You are a Metis integrator agent.

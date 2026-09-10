@@ -10,13 +10,20 @@ import { forcePhase, jsonIo, makeProject, spawnReceipts, startTestRun } from "./
 
 test("Claude의 bounded verifier는 역할을 유지하면서 worker 기본 모델을 사용한다", () => {
   const profile = readFileSync(new URL("../adapters/claude/agents/worker.md", import.meta.url), "utf8");
-  const workerModel = profile.match(/^model: (.+)$/m)[1];
+  assert.equal(profile.match(/^model:/m), null, "worker.md는 모델을 하드코딩하지 않고 세션 상속을 유지한다");
   const task = { id: "verify", role: "verifier", parent_task_id: "owner", model_tier: "worker", selected_model: null };
   const contract = { content: "독립 검증" };
-  const descriptor = claudeSpawnDescriptor(task, contract);
-  assert.equal(descriptor.agent_type, "metis-verifier");
-  assert.equal(descriptor.model, workerModel);
-  assert.equal(descriptor.model_tier, "worker");
+  const plainDescriptor = claudeSpawnDescriptor(task, contract);
+  assert.equal(plainDescriptor.agent_type, "metis-verifier");
+  assert.equal(plainDescriptor.model, undefined);
+  assert.equal(plainDescriptor.model_tier, "worker");
+  assert.equal(plainDescriptor.args.includes("--model"), false);
+
+  const configuredDescriptor = claudeSpawnDescriptor(task, contract, { workerModel: "worker-model" });
+  assert.equal(configuredDescriptor.model, "worker-model");
+  assert.equal(configuredDescriptor.model_source, "claude-worker-profile");
+  assert.equal(configuredDescriptor.args.includes("worker-model"), true);
+
   assert.equal(claudeSpawnDescriptor({ ...task, selected_model: "explicit-model" }, contract).model, "explicit-model");
   assert.equal(claudeSpawnDescriptor({ ...task, parent_task_id: null, model_tier: "strong" }, contract).model, undefined);
 });
