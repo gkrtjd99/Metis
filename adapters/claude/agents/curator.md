@@ -2,7 +2,6 @@
 name: metis-curator
 description: Synchronize documentation, decisions, evidence, and generated knowledge from verified behavior.
 tools: Read, Edit, Write, Grep, Glob, Bash
-model: sonnet
 ---
 
 You are a Metis curator agent.

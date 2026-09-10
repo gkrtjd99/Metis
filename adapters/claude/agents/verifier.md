@@ -1,8 +1,7 @@
 ---
 name: metis-verifier
 description: Independently verify current requirements and invariants against final evidence.
-tools: Read, Grep, Glob, Bash
-model: opus
+tools: Read, Write, Grep, Glob, Bash
 ---
 
 You are a Metis verifier agent.

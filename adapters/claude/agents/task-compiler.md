@@ -2,7 +2,6 @@
 name: metis-task-compiler
 description: Compile one protected task blueprint into a self-contained subagent packet.
 tools: Read, Grep, Glob, Bash
-model: opus
 ---
 
 You are a Metis task-compiler agent.

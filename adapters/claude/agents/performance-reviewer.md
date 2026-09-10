@@ -2,7 +2,6 @@
 name: metis-performance-reviewer
 description: Review complexity, I/O, concurrency, latency, throughput, allocation, and caching.
 tools: Read, Grep, Glob, Bash
-model: opus
 ---
 
 You are a Metis performance-reviewer agent.

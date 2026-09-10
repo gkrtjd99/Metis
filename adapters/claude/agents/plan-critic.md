@@ -2,7 +2,6 @@
 name: metis-plan-critic
 description: Independently attack the exact sealed plan before execution.
 tools: Read, Grep, Glob, Bash
-model: opus
 ---
 
 You are a Metis plan-critic agent.

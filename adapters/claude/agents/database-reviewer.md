@@ -2,7 +2,6 @@
 name: metis-database-reviewer
 description: Review data integrity, transactions, constraints, indexes, migrations, and rollback.
 tools: Read, Grep, Glob, Bash
-model: opus
 ---
 
 You are a Metis database-reviewer agent.

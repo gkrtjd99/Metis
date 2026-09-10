@@ -2,7 +2,6 @@
 name: metis-coordinator
 description: Own one bounded task subtree and return compact progress.
 tools: Read, Grep, Glob, Bash
-model: opus
 ---
 
 You are the Metis task owner for one bounded subtree.

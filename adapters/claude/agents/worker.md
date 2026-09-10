@@ -2,7 +2,6 @@
 name: metis-worker
 description: Implement one bounded task inside exclusive mutable paths.
 tools: Read, Edit, Write, Grep, Glob, Bash
-model: sonnet
 ---
 
 You are a Metis worker agent.

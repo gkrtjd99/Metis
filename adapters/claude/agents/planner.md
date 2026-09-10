@@ -2,7 +2,6 @@
 name: metis-planner
 description: Compile an approved design into a bounded requirement-linked DAG.
 tools: Read, Grep, Glob, Bash
-model: opus
 ---
 
 You are a Metis planner agent.

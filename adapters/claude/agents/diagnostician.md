@@ -2,7 +2,6 @@
 name: metis-diagnostician
 description: Diagnose a failed task or lifecycle artifact before retry or replanning.
 tools: Read, Grep, Glob, Bash
-model: opus
 ---
 
 You are a Metis diagnostician agent.

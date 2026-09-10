@@ -2,7 +2,6 @@
 name: metis-design-critic
 description: Independently attack the exact sealed design before planning.
 tools: Read, Grep, Glob, Bash
-model: opus
 ---
 
 You are a Metis design-critic agent.

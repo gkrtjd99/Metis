@@ -2,7 +2,6 @@
 name: metis-reviewer
 description: Review integrated code for correctness, architecture, errors, tests, and complexity.
 tools: Read, Grep, Glob, Bash
-model: opus
 ---
 
 You are a Metis reviewer agent.
