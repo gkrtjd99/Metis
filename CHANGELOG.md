@@ -1,8 +1,25 @@
 # Changelog
 
-## 1.1.0 - 2026-09-07
+## 1.2.0 - 2026-09-10
 
 Current public release.
+
+- Added state-driven continuation runtime commands (`metis continuation install|uninstall|inspect|bind|detach`)
+  for Claude Code and Codex hosts to deterministically govern post-turn execution (`CONTINUE`, `WAIT`,
+  `PAUSE`, `COMPLETE`, `DETACHED`) based on verified SQLite state rather than model-generated completions.
+- Added durable skill workflow entry points (`$metis prd|plan|run|resume|status`) with canonical markdown
+  templates (`templates/prd.md`, `templates/plan.md`, `templates/decision.md`), separating requirement
+  definitions and planning from implementation, and enabling reliable session crash recovery.
+- Unpinned hardcoded model definitions (`opus`, `sonnet`, `haiku`) from Claude Code agent profiles,
+  allowing subagents to naturally inherit the active host session model (including Gemini, Fable, or newer Claude models)
+  and dynamically routing tasks by difficulty tier (Strong vs Worker) and negotiated reasoning effort.
+- Generalized `claudeSpawnDescriptor` bounded verifier routing to use configured project defaults or session
+  inheritance instead of forcing a fixed model string.
+- Added host capacity modeling (`host-capacity.js`) to track simultaneous subagent allocations and token budgets.
+- Reinforced task completion safety, execution policy mutations, rematerialization boundaries, and crash journal replay.
+- Kept schema 11, configuration 6, and runtime layout 4 unchanged; no database migration is required.
+
+## 1.1.0 - 2026-09-07
 
 - Added owner lifecycle commands for coordinators to claim, monitor, verify,
   and complete an approved direct-child subtree using task leases rather than

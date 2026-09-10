@@ -1,13 +1,13 @@
 # Metis 릴리즈와 공개 배포
 
-## 현재 1.1.0 릴리즈와 승인 범위
+## 현재 1.2.0 릴리즈와 승인 범위
 
-1.1.0은 현재 public release이며, 이 문서는 해당 릴리즈의 패키징·검증 기록과
+1.2.0은 현재 public release이며, 이 문서는 해당 릴리즈의 패키징·검증 기록과
 향후 공개 절차를 구분한다. 로컬 검증과 패키지 생성 자체는 commit, push, PR
 병합, 태그 생성, GitHub release 또는 npm registry 공개를 수행하지 않는다.
 이 저장소의 외부 반영은 release owner가 승인 경계에 따라 별도로 수행한다.
 
-Schema 11, configuration 6, runtime layout 4는 1.0.1과 동일하다.
+Schema 11, configuration 6, runtime layout 4는 1.1.0과 동일하다.
 이번 변경으로 마이그레이션은 필요하지 않다. `ownerExecution`은 기본 비활성화이며,
 실제 host capability와 그 증거 없이 활성화하거나 중첩 Agent 지원을 주장하지 않는다.
 
@@ -17,13 +17,13 @@ verifier → 같은 owner 세션 복귀 및 완료를 확인했다. 계획 단�
 실패 복구·성능 개선은 이 결과로 입증되지 않는다. 패키지 검사를 native 모델
 실행 검사로 설명하지 않는다.
 
-## 1.1.0 패키지 검증
+## 1.2.0 패키지 검증
 
 저장소 루트에서 실행한다. 매번 새 임시 디렉터리를 사용해 이전 증거를 덮어쓰지 않는다.
 미커밋 변경이 있다면 기준 HEAD뿐 아니라 변경 diff와 검사 결과도 보존한다.
 
 ```sh
-release_dir=$(mktemp -d "${TMPDIR:-/tmp}/metis-1.1.0-release.XXXXXX") &&
+release_dir=$(mktemp -d "${TMPDIR:-/tmp}/metis-1.2.0-release.XXXXXX") &&
 npm run docs:generate &&
 npm run check > "$release_dir/check.log" 2>&1 &&
 npm pack --json --pack-destination "$release_dir" > "$release_dir/pack.json"
@@ -37,17 +37,24 @@ CLI의 `init --host all`, owner/relay 도움말, 기본 capability 비활성화�
 
 ## 별도 설치와 체크섬 확인
 
-아래는 npm이 `metis-orchestrator-1.1.0.tgz`를 생성한 경우다. 실제 파일명은
+아래는 npm이 `metis-orchestrator-1.2.0.tgz`를 생성한 경우다. 실제 파일명은
 `pack.json`과 대조한다. 전역 설치나 사용자 프로젝트 초기화는 하지 않는다.
 
 ```sh
 test -n "$release_dir" &&
-tarball="$release_dir/metis-orchestrator-1.1.0.tgz" &&
+tarball="$release_dir/metis-orchestrator-1.2.0.tgz" &&
 mkdir "$release_dir/extracted" "$release_dir/consumer" "$release_dir/fixture" &&
 tar -xzf "$tarball" -C "$release_dir/extracted" &&
 node --no-warnings "$release_dir/extracted/package/src/cli.js" --help &&
 npm install --offline --ignore-scripts --no-audit --no-fund \
   --prefix "$release_dir/consumer" "$tarball" &&
+node --no-warnings "$release_dir/consumer/node_modules/.bin/metis" --help &&
+git -C "$release_dir/fixture" init -q &&
+node --no-warnings "$release_dir/consumer/node_modules/.bin/metis" \
+  --root "$release_dir/fixture" init --host all &&
+(cd "$release_dir" && shasum -a 256 metis-orchestrator-1.2.0.tgz > SHA256SUMS) &&
+(cd "$release_dir" && shasum -a 256 -c SHA256SUMS)
+```
 node --no-warnings "$release_dir/consumer/node_modules/.bin/metis" --help &&
 git -C "$release_dir/fixture" init -q &&
 node --no-warnings "$release_dir/consumer/node_modules/.bin/metis" \
@@ -73,8 +80,8 @@ checksum은 해당 검증에만 사용하고 공개 파일로 재사용하지 �
 - package/schema/configuration/layout 버전
 - native host 검사에 사용한 코드 기준과 실제 검증 범위
 
-검사 결과는 해당 실행의 실제 로그를 기준으로 기록한다. 이전 1.0.1 코드의
-통과 결과를 1.1.0 검사 결과로 재사용하지 않는다. Chromium이 없는 경우
+검사 결과는 해당 실행의 실제 로그를 기준으로 기록한다. 이전 1.1.0 코드의
+통과 결과를 1.2.0 검사 결과로 재사용하지 않는다. Chromium이 없는 경우
 브라우저 검사를 통과로 바꾸지 않고 skip 사유를 남긴다.
 
 ## 향후 태그·공개 절차
@@ -87,21 +94,21 @@ checksum은 해당 검증에만 사용하고 공개 파일로 재사용하지 �
    관련 문서의 준비 상태·최신 공개 버전·다운로드 링크를 최종화한다.
 2. 변경을 commit하고 PR의 CI·보안 검사 통과 후 `main`에 병합한다.
 3. 깨끗한 최종 checkout에서 `npm run check`를 실행하고, 승인된 release
-   commit에 `v1.1.0` 태그를 만든다. 로컬 HEAD와 태그 commit의 일치를 확인한다.
+   commit에 `v1.2.0` 태그를 만든다. 로컬 HEAD와 태그 commit의 일치를 확인한다.
 4. 그 checkout에서 새 `npm pack` 파일을 만들고 설치 검사를 반복한다. 소스
    아카이브는 같은 태그를 사용한다.
 
 ```sh
-release_dir=$(mktemp -d "${TMPDIR:-/tmp}/metis-1.1.0-release.XXXXXX") &&
+release_dir=$(mktemp -d "${TMPDIR:-/tmp}/metis-1.2.0-release.XXXXXX") &&
 source_status=$(git status --porcelain) &&
 test -z "$source_status" &&
 source_commit=$(git rev-parse HEAD) &&
-tag_commit=$(git rev-parse 'v1.1.0^{commit}') &&
+tag_commit=$(git rev-parse 'v1.2.0^{commit}') &&
 test "$source_commit" = "$tag_commit" &&
-git archive --format=tar.gz --prefix=Metis-1.1.0/ \
-  --output="$release_dir/Metis-1.1.0.tar.gz" v1.1.0 &&
+git archive --format=tar.gz --prefix=Metis-1.2.0/ \
+  --output="$release_dir/Metis-1.2.0.tar.gz" v1.2.0 &&
 npm pack --json --pack-destination "$release_dir" > "$release_dir/pack.json" &&
-(cd "$release_dir" && shasum -a 256 Metis-1.1.0.tar.gz metis-orchestrator-1.1.0.tgz > SHA256SUMS) &&
+(cd "$release_dir" && shasum -a 256 Metis-1.2.0.tar.gz metis-orchestrator-1.2.0.tgz > SHA256SUMS) &&
 (cd "$release_dir" && shasum -a 256 -c SHA256SUMS)
 ```
 
@@ -112,4 +119,4 @@ GitHub release에는 동일한 commit에서 만든 source tar.gz, npm tgz, SHA25
 
 기존 `metis-pre-1.0-baseline` / `metis-1.0.1-candidate` 식별자는 과거 비교용
 preset 및 검증 gate에 연결되어 있다. 이번 버전 정리에서 이름을 바꾸거나 이를
-1.1.0 성능 증거로 해석하지 않는다.
+1.2.0 성능 증거로 해석하지 않는다.
