@@ -1,5 +1,7 @@
 # Metis 1.2.0
 
+[![HOL Guard](https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fplugin%3Fslug%3Daustin%252Fmetis%26metric%3Dtrust)](https://hol.org/go/guard/gkrtjd999?dest=%2Fguard%2Fbilling%3Fpromo%3DGUARD20-GKRTJD999%23upgrade&link_id=05597c15-b717-4217-8fc2-42dc2fa60b06&utm_source=insights_share&utm_medium=affiliate_cta&utm_campaign=share20)
+
 [English](README.md) | [한국어](docs/README.ko.md)
 
 Metis is a subagent-first engineering orchestrator for long repository goals.
