@@ -221,7 +221,7 @@ Review and verification:
   metis review list|get|status|reconcile|report ...
   metis verification candidate
   metis verification get
-  metis check detect
+  metis check detect [--name <name>]
   metis check add --name <name> (--command <executable> [--args '<json-array>'] | --command-json '<json>')
   metis check list
   metis check run [--name <name>] [--continue]
@@ -981,7 +981,7 @@ async function dispatch(positionals, flags, context) {
   if (key === "decision get") return getDecision(db, positionals[2]);
   if (key === "decision status") return setDecisionStatus(db, resolveRun(db, flags).id, positionals[2], positionals[3], flags.note ?? null);
 
-  if (key === "check detect") return registerDetectedChecks(db, projectRoot, resolveRun(db, flags).id);
+  if (key === "check detect") return registerDetectedChecks(db, projectRoot, resolveRun(db, flags).id, { name: flags.name });
   if (key === "check add") {
     invariant(flags.name && (flags.command || flags["command-json"]), "CHECK_FIELDS", "check add requires --name and a structured command.");
     const command = flags["command-json"]

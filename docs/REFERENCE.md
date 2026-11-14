@@ -633,7 +633,7 @@ Review and verification:
   metis review list|get|status|reconcile|report ...
   metis verification candidate
   metis verification get
-  metis check detect
+  metis check detect [--name <name>]
   metis check add --name <name> (--command <executable> [--args '<json-array>'] | --command-json '<json>')
   metis check list
   metis check run [--name <name>] [--continue]

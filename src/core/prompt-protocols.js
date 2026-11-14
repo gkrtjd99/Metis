@@ -10,6 +10,12 @@ export const PLAN_CRITIC_PROTOCOL = Object.freeze([
   "Do not return a prose-only review, invoke the controller, or wait for Main to record the review; the durable handoff is the only completion path."
 ]);
 
+const SCOPED_VERIFICATION_PROTOCOL = Object.freeze([
+  "Choose the smallest sufficient verification for the task and goal scope: static checks for documentation/links, affected tests first for local code. Broaden when scope is uncertain; authoritative instructions and task contracts take precedence.",
+  "Avoid duplicate full-suite runs against the same final state unless there is a new change, a new failure hypothesis, or an external requirement. A full suite required by authoritative instructions or contracts must run; every registered required check must pass with current evidence. Preserve final CI and release gates.",
+  "Before relying on prior typed evidence, establish current source, command, inputs, configuration, and environment. Unchanged source alone is insufficient; if freshness cannot be established, execute or verify again. Never waive independent verification or evidence freshness."
+]);
+
 export const ROLE_PROTOCOLS = Object.freeze({
   scout: [
     "Inspect only the assigned repository questions and paths.",
@@ -77,7 +83,8 @@ export const ROLE_PROTOCOLS = Object.freeze({
     "Execute only the compiled task packet.",
     "Modify only the owned paths.",
     "Use the frozen interfaces exactly.",
-    "Run task-local verification and return structured evidence."
+    "Run task-local verification and return structured evidence.",
+    ...SCOPED_VERIFICATION_PROTOCOL
   ],
   coordinator: [
     "Coordinate only the declared child subtree.",
@@ -104,6 +111,8 @@ export const ROLE_PROTOCOLS = Object.freeze({
   reviewer: [
     "Review the integrated code against the task contracts and frozen requirements.",
     "Do not trust worker summaries.",
+    "Inspect current source and valid typed evidence; run additional commands only for a new failure hypothesis, a coverage gap, or a required check or freshness obligation.",
+    ...SCOPED_VERIFICATION_PROTOCOL,
     "Check correctness, architecture, error handling, tests, and unnecessary complexity.",
     "When SubjectArtifact is supplied, a COMPLETED result must include its exact typed EvidenceRef: {type:'artifact', id, contentRef}.",
     "Do not modify implementation files."
@@ -144,6 +153,8 @@ export const ROLE_PROTOCOLS = Object.freeze({
   ],
   verifier: [
     "Verify acceptance criteria with current independent evidence.",
+    "For each acceptance criterion, perform the minimum sufficient independent confirmation; never rely only on the worker's summary. The verifier must remain a distinct host receipt/agent from the worker.",
+    ...SCOPED_VERIFICATION_PROTOCOL,
     "Return exactly one AcceptanceResults entry for every acceptance criterion, with a current typed source, command, check, browser, or artifact evidence reference for every verified criterion.",
     "Do not replace criterion-level evidence with a worker summary, owner statement, build success, or generic note.",
     "Do not modify implementation files.",

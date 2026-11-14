@@ -445,22 +445,19 @@ A repair becomes a new bounded task.
 
 ## Review and verification
 
-Review the integrated repository with fresh reviewer tasks.
-Use only the specialist capabilities selected by current requirements, paths, interfaces, and risks.
-Blocking findings become repair tasks.
-After repair, run fresh review against the new fingerprint.
-Verification can include:
-
-- structured deterministic checks;
-- semantic verifier tasks;
-- browser verifier tasks;
-- conditional human checkpoints;
-- an immutable verification candidate;
-- `adversarial-reviewer` completion review.
-
-A verifier must be a distinct host receipt/agent from the worker and must
-inspect the worker's result independently. Main must not operate the browser or
-judge screenshots.
+Review the integrated repository with fresh reviewer tasks; use only specialists selected by requirements, paths, interfaces, and risks.
+Blocking findings become repair tasks. After repair, review the new fingerprint.
+Workers run task-local verification and return structured evidence.
+Reviewers inspect current source and valid typed evidence, not worker summaries; additional commands need a new failure hypothesis, coverage gap, or required check/freshness obligation.
+A verifier must remain a distinct host receipt/agent from the worker and perform minimum sufficient independent confirmation for every acceptance criterion.
+Return one AcceptanceResults entry per criterion with current typed source, command, check, browser, or artifact evidence; worker summaries and build success are not behavioral proof.
+Choose verification by task and goal scope: static checks for documentation/links, affected tests first for local code; widen when scope is uncertain.
+Required instructions and contracts take precedence, including any required full suite. Every registered required check must pass with current evidence; preserve final CI/release gates.
+Avoid duplicate full-suite runs on the same final state unless there is a new change, new failure hypothesis, or external requirement.
+Before relying on prior evidence, establish current source, command, inputs, configuration, and environment. Unchanged source alone is insufficient; if freshness is uncertain, execute or verify again.
+Never waive independent verification or evidence freshness. See [lifecycle.md](references/lifecycle.md) for scoped checks.
+Verification retains required deterministic checks, semantic/browser tasks, human checkpoints, an immutable candidate, and `adversarial-reviewer` completion review.
+Main must not operate the browser or judge screenshots.
 A browser verifier records assertions, viewport, screenshots, console errors, network failures, and code fingerprint as browser evidence.
 
 ## Curate and complete

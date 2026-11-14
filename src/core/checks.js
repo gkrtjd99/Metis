@@ -68,8 +68,21 @@ export function registerCheck(db, runId, check) {
   return listChecks(db, run.id).find((item) => item.name === check.name.trim());
 }
 
-export function registerDetectedChecks(db, projectRoot, runId) {
-  return detectChecks(projectRoot).map((check) => registerCheck(db, runId, check));
+export function registerDetectedChecks(db, projectRoot, runId, options = {}) {
+  const checks = detectChecks(projectRoot);
+  if (options.name !== undefined) {
+    invariant(typeof options.name === "string" && options.name.trim(), "CHECK_NAME", "A detected check name must be a non-empty string.");
+    const check = checks.find((item) => item.name === options.name);
+    invariant(check, "CHECK_NOT_FOUND", `No detected check named ${options.name} was found.`);
+    const existing = listChecks(db, runId).find((item) => item.name === check.name);
+    return [registerCheck(db, runId, {
+      ...check,
+      required: check.required || existing?.required === true,
+      requirementIds: existing?.requirementIds ?? [],
+      invariantIds: existing?.invariantIds ?? []
+    })];
+  }
+  return checks.map((check) => registerCheck(db, runId, check));
 }
 
 export function listChecks(db, runId) {

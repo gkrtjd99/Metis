@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Added `metis check detect --name <name>` to register one detected check without
+  automatically requiring every detected suite. Existing required checks and the
+  default full detection behavior remain unchanged.
+- Made verification guidance proportional to change scope and risk across worker,
+  reviewer, verifier, and packaged skill instructions. Prefer task-local checks
+  and current evidence over repeated full-suite runs without a new reason.
+- Preserved independent criterion-level verification, evidence freshness,
+  completion gates, and full CI/release checks. No automatic result caching or
+  measured performance improvement is claimed.
+
 ## 1.2.0 - 2026-09-10
 
 Current public release.
