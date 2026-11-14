@@ -99,7 +99,7 @@ Transient retries create a new attempt; contract, dependency, plan, and
 external failures require diagnosis or an explicit route.
 
 Workers use frozen interfaces and declared scope.
-They return structured results.
+They run task-local verification and return structured evidence.
 They do not create undeclared work.
 
 ## Review
@@ -108,6 +108,9 @@ Review the integrated repository with fresh subagents.
 Run general and selected specialist review.
 Blocking findings become repair tasks.
 Repeat review against the current code fingerprint.
+Reviewers inspect current source and valid typed evidence, not worker summaries.
+Additional commands must address a new failure hypothesis, coverage gap, or
+required check/freshness obligation; do not repeat a full suite merely for review.
 
 ## Verify
 
@@ -117,7 +120,30 @@ Resolve required checkpoints.
 Create one immutable verification candidate.
 Run adversarial completion review when required.
 
+Each verifier remains a distinct host receipt/agent from the worker and performs
+minimum sufficient independent confirmation for every acceptance criterion.
+Return exactly one AcceptanceResults entry per criterion, with current typed
+source, command, check, browser, or artifact evidence for every verified criterion.
+A worker summary, owner statement, or build success is not behavioral proof.
 Main does not operate the browser or judge screenshots.
+
+### Scope verification, not completion gates
+
+Choose the smallest sufficient checks for the task and goal scope: static
+content/link/mirror checks for documentation or links, affected tests first for
+localized code. Widen the scope when impact is uncertain. Required instructions
+and contracts take precedence, including any mandated full suite.
+Use explicit `check detect --name <name>` registration and `check run --name <name>`
+execution, or `check add` for a task-specific structured command. Unfiltered
+`check detect` still registers all detected checks; selection does not waive any
+already registered required check. All required checks must pass with current evidence.
+Avoid duplicate full-suite runs against the same final state unless there is a
+new change, new failure hypothesis, or external requirement.
+Before relying on prior typed evidence, establish current source, command,
+inputs, configuration, and environment. Unchanged source alone is insufficient;
+if freshness cannot be established, execute or verify again. This is not an
+automatic success cache. Never waive independent verification or evidence freshness.
+Preserve required checkpoints, candidate/review gates, and final CI/release gates.
 
 ## Curate
 

@@ -627,13 +627,47 @@ receipt에서 통합/완료 승인을 파생한다. `drive`가 이 기록과 det
 Blocking review findings become repair tasks.
 After repair, run fresh review against the current code fingerprint.
 
-Repository checks use structured commands:
+Choose verification by task and goal scope, with required instructions and
+contracts taking precedence: static content/link/mirror checks for documentation
+or links, affected tests first for localized code. Broaden when impact is
+uncertain, and run a full suite whenever required by instructions or contract.
+Workers return task-local evidence. Reviewers inspect current source and valid
+typed evidence rather than worker summaries; additional commands address a new
+failure hypothesis, coverage gap, or required check/freshness obligation.
+Independent verifiers confirm every acceptance criterion with the minimum
+sufficient independent evidence and retain criterion-level typed references.
+
+Register and run a selected detected check explicitly (replace `<name>` with an
+existing detected script/check, such as `lint`):
 
 ```sh
-metis check detect --pretty
-metis check add --name test --command npm --args '["test"]' --pretty
-metis check run --continue --pretty
+metis check detect --name <name> --pretty
+metis check run --name <name> --pretty
 ```
+
+For task-specific verification, register a custom structured command instead;
+this example targets one test file, not the entire test suite:
+
+```sh
+metis check add --name prompt-protocols --command node --args '["--no-warnings","--test","tests/prompt-protocols.test.js"]' --pretty
+metis check run --name prompt-protocols --pretty
+```
+
+Choose actual project paths and commands that cover the acceptance criteria.
+Unfiltered `metis check detect --pretty` still registers **all** detected checks;
+unfiltered `metis check run --continue --pretty` executes all registered checks
+and continues after failures. Use these when the broader scope is required.
+`--name` only selects registration or execution; it does not remove, waive, or
+satisfy other required checks. Every registered required check must pass with
+current evidence before completion.
+
+Avoid repeating a full suite on the same final state unless there is a new
+change, new failure hypothesis, or external requirement. Before relying on prior
+typed evidence, establish current source, command, inputs, configuration, and
+environment; unchanged source alone is insufficient. If freshness cannot be
+established, execute or verify again. No automatic success cache is introduced.
+Independent verifier receipts, evidence freshness, authority, completion gates,
+and final CI/release checks remain mandatory.
 
 UI work can require browser scenarios and browser evidence.
 The controller requests verifier tasks for missing scenarios.
